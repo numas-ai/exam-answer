@@ -133,11 +133,12 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       return EMPTY;
     }
     /*
-     * 只有学生看到作答面板。判据是进入工具写下的 `role`：
-     * `ns === userId` = 自己的仓 = 老师；否则是受邀进来的学生。
-     * 老会话没有 role 字段时按学生处理（进入工具下次会补上）。
+     * 只有**明确判定为学生**才显示作答面板。
+     * 判据是进入工具写下的 `role`（查 repo 所有权：owner = 老师）。
+     * 老会话没有 role 字段时按老师处理 —— 宁可不出作答面板，
+     * 也不能让出题方看见学生的倒计时与交卷入口。
      */
-    if (session.role === "teacher") {
+    if (session.role !== "student") {
       return EMPTY;
     }
     const conf = await this.read(vscode.Uri.joinPath(folder, ...CONF_FILE.split("/")));
@@ -499,6 +500,23 @@ const firstLineOf = (text: string): string => {
   return "";
 };
 
+/** 读进入工具写下的 role；没有会话文件或字段时返回空串。 */
+const readRole = async (folder: vscode.Uri): Promise<string> => {
+  try {
+    const raw = await vscode.workspace.fs.readFile(
+      vscode.Uri.joinPath(folder, ".sumi", "exam-session.json"),
+    );
+    const data: unknown = JSON.parse(new TextDecoder().decode(raw));
+    if (typeof data !== "object" || data === null) {
+      return "";
+    }
+    const role = (data as Record<string, unknown>)["role"];
+    return typeof role === "string" ? role : "";
+  } catch {
+    return "";
+  }
+};
+
 /**
  * 左侧默认视图是出题方的考试面板（模板里静态写的 `sumi.defaultView.left`），
  * 而活动栏默认隐藏、学生没有图标可点 —— 检测到这是作答工作区（有会话文件）时，
@@ -512,6 +530,11 @@ const switchLeftView = async (): Promise<boolean> => {
   try {
     await vscode.workspace.fs.stat(vscode.Uri.joinPath(folder, ".sumi", "exam-session.json"));
   } catch {
+    return false;
+  }
+  /* 只有学生才切到作答面板：老师那边是本扩展不该抢的位置。 */
+  const role = await readRole(folder);
+  if (role !== "student") {
     return false;
   }
   try {
