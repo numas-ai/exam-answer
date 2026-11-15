@@ -1,0 +1,542 @@
+/**
+ * 学生侧「作答」面板（`numas.exam.answer.view`）。
+ *
+ * <p>职责只有三件：**倒计时、题目列表、交卷**。
+ * 与出题方的考试面板（考试信息 / 参考资料 / 发布考试）分开成两个扩展：
+ * 两类角色看到的东西没有交集，混在一起会让彼此的界面互相污染。
+ *
+ * <p>显示条件：工作区里有 `.sumi/exam-session.json`（进入工具在首次进入时写下）。
+ * 出题方的工作区没有这个文件。
+ */
+import * as vscode from "vscode";
+
+const VIEW_ID = "numas.exam.answer.view";
+/** 个人计时状态（进入工具写入，不进 git）。 */
+const SESSION_FILE = ".sumi/exam-session.json";
+/** 工作区业务配置：试卷清单与作答时长。 */
+const CONF_FILE = ".sumi/workspace.conf";
+/** 提交工具与它写出的状态文件（工作区自带）。 */
+const SUBMIT_TOOL_PATH = ".opencode/tools/repo-submit.mjs";
+const SUBMIT_STATE_PATH = ".sumi/repo-submit.json";
+const SUBMIT_POLL_INTERVAL_MS = 500;
+const SUBMIT_TIMEOUT_MS = 3 * 60 * 1000;
+/** 刷新节奏：会话文件可能稍后才写入，面板先空着再自动接上。 */
+const REFRESH_MS = 4000;
+
+type QuestionItem = {
+  /** 卷面题号（`:::type#N` 的 N）。 */
+  readonly number: number;
+  /** 题干首行，用作列表标题。 */
+  readonly title: string;
+};
+
+type ViewModel = {
+  /** 是否处于作答工作区（没有会话文件时为 false）。 */
+  readonly answering: boolean;
+  /** 个人截止时间（epoch 毫秒）；null = 不限时。 */
+  readonly deadlineAtMs: number | null;
+  /** 当前分支（提交要 push 到它）。 */
+  readonly branch: string;
+  readonly questions: readonly QuestionItem[];
+  /** 试卷标题。 */
+  readonly paperTitle: string;
+};
+
+const EMPTY: ViewModel = {
+  answering: false,
+  deadlineAtMs: null,
+  branch: "",
+  questions: [],
+  paperTitle: "",
+};
+
+export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Disposable {
+  private view: vscode.WebviewView | undefined;
+  private timer: NodeJS.Timeout | undefined;
+  private submitting = false;
+
+  dispose(): void {
+    if (this.timer !== undefined) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+  }
+
+  resolveWebviewView(view: vscode.WebviewView): void {
+    this.view = view;
+    view.webview.options = { enableScripts: true };
+    view.webview.html = this.html();
+    view.webview.onDidReceiveMessage((message: unknown) => {
+      if (typeof message !== "object" || message === null) {
+        return;
+      }
+      const record = message as { type?: unknown; auto?: unknown };
+      if (record.type === "ready") {
+        void this.refresh();
+        return;
+      }
+      if (record.type === "submit") {
+        void this.submit(record.auto === true).catch((error: unknown) => {
+          this.post({
+            type: "submitProgress",
+            state: "failed",
+            message: `${record.auto === true ? "自动提交失败" : "提交失败"}：${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          });
+        });
+        return;
+      }
+      if (record.type === "reveal" && typeof (message as { number?: unknown }).number === "number") {
+        void vscode.commands.executeCommand("numas.paper.reveal", String((message as { number: number }).number));
+      }
+    });
+    this.timer = setInterval(() => void this.refresh(), REFRESH_MS);
+    void this.refresh();
+  }
+
+  private folder(): vscode.Uri | undefined {
+    return vscode.workspace.workspaceFolders?.[0]?.uri;
+  }
+
+  private async read(uri: vscode.Uri): Promise<string | undefined> {
+    try {
+      return new TextDecoder("utf-8").decode(await vscode.workspace.fs.readFile(uri));
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async exists(uri: vscode.Uri): Promise<boolean> {
+    return (await this.read(uri)) !== undefined;
+  }
+
+  private post(message: unknown): void {
+    void this.view?.webview.postMessage(message);
+  }
+
+  private async refresh(): Promise<void> {
+    if (this.view === undefined) {
+      return;
+    }
+    this.post({ type: "model", model: await this.load() });
+  }
+
+  /** 组装面板数据；没有会话文件说明不是作答工作区。 */
+  private async load(): Promise<ViewModel> {
+    const folder = this.folder();
+    if (folder === undefined) {
+      return EMPTY;
+    }
+    const session = await this.session(folder);
+    if (session === undefined) {
+      return EMPTY;
+    }
+    /*
+     * 只有学生看到作答面板。判据是进入工具写下的 `role`：
+     * `ns === userId` = 自己的仓 = 老师；否则是受邀进来的学生。
+     * 老会话没有 role 字段时按学生处理（进入工具下次会补上）。
+     */
+    if (session.role === "teacher") {
+      return EMPTY;
+    }
+    const conf = await this.read(vscode.Uri.joinPath(folder, ...CONF_FILE.split("/")));
+    const paperPath = conf === undefined ? "" : paperPathOf(conf);
+    const paper =
+      paperPath.length === 0
+        ? undefined
+        : await this.read(vscode.Uri.joinPath(folder, ...paperPath.split("/")));
+    return {
+      answering: true,
+      deadlineAtMs: session.deadlineAt.length === 0 ? null : Date.parse(session.deadlineAt),
+      branch: await this.branch(folder),
+      questions: paper === undefined ? [] : parseQuestions(paper),
+      paperTitle: paper === undefined ? "" : paperTitleOf(paper, paperPath),
+    };
+  }
+
+  private async session(
+    folder: vscode.Uri,
+  ): Promise<{ firstEnteredAt: string; deadlineAt: string; role: string } | undefined> {
+    const text = await this.read(vscode.Uri.joinPath(folder, ...SESSION_FILE.split("/")));
+    if (text === undefined) {
+      return undefined;
+    }
+    try {
+      const data: unknown = JSON.parse(text);
+      if (typeof data !== "object" || data === null) {
+        return undefined;
+      }
+      const record = data as Record<string, unknown>;
+      const firstEnteredAt = typeof record["firstEnteredAt"] === "string" ? record["firstEnteredAt"] : "";
+      if (firstEnteredAt.length === 0) {
+        return undefined;
+      }
+      return {
+        firstEnteredAt,
+        deadlineAt: typeof record["deadlineAt"] === "string" ? record["deadlineAt"] : "",
+        role: typeof record["role"] === "string" ? record["role"] : "",
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** 当前分支短名；分离头指针返回空串。 */
+  private async branch(folder: vscode.Uri): Promise<string> {
+    const head = await this.read(vscode.Uri.joinPath(folder, ".git", "HEAD"));
+    if (head === undefined) {
+      return "";
+    }
+    const ref = /^ref:\s*refs\/heads\/(.+)\s*$/m.exec(head);
+    return ref === null ? "" : (ref[1] ?? "").trim();
+  }
+
+  /**
+   * 交卷：起终端跑工作区自带的 `repo-submit.mjs`，把改动 commit 并 push 到当前分支。
+   *
+   * <p>不在这里另写一套提交：排除项与 push 规则都在工具里。
+   */
+  private async submit(auto: boolean): Promise<void> {
+    if (this.submitting) {
+      return;
+    }
+    const folder = this.folder();
+    if (folder === undefined) {
+      throw new Error("当前工作区不可用");
+    }
+    if (!(await this.exists(vscode.Uri.joinPath(folder, ...SUBMIT_TOOL_PATH.split("/"))))) {
+      throw new Error(`工作区里没有提交工具（${SUBMIT_TOOL_PATH}）`);
+    }
+    this.submitting = true;
+    this.post({ type: "submitProgress", state: "running", message: auto ? "正在自动提交…" : "正在提交答卷…" });
+    try {
+      const stateUri = vscode.Uri.joinPath(folder, ...SUBMIT_STATE_PATH.split("/"));
+      await vscode.workspace.fs.delete(stateUri, { useTrash: false }).then(undefined, () => undefined);
+
+      const command = `node ${SUBMIT_TOOL_PATH}`;
+      try {
+        await vscode.commands.executeCommand("numas.ui.terminal.run", { text: command, cwd: folder.fsPath });
+      } catch {
+        await vscode.commands.executeCommand("numas.ui.terminal.run", {
+          text: `cd ${JSON.stringify(folder.fsPath)} && ${command}`,
+        });
+      }
+
+      const outcome = await this.waitForSubmit(stateUri);
+      if (!outcome.ok) {
+        throw new Error(outcome.error.length > 0 ? outcome.error : "提交失败：终端工具没有给出原因");
+      }
+      const message = outcome.branch.length > 0 ? `已提交到 ${outcome.branch}` : "已提交";
+      this.post({ type: "submitProgress", state: "done", message });
+      void vscode.window.showInformationMessage(message);
+      await this.refresh();
+    } finally {
+      this.submitting = false;
+    }
+  }
+
+  private async waitForSubmit(
+    stateUri: vscode.Uri,
+  ): Promise<{ ok: true; branch: string } | { ok: false; error: string }> {
+    const deadline = Date.now() + SUBMIT_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, SUBMIT_POLL_INTERVAL_MS));
+      const text = await this.read(stateUri);
+      if (text === undefined || text.trim().length === 0) {
+        continue;
+      }
+      let data: unknown;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        continue;
+      }
+      if (typeof data !== "object" || data === null) {
+        continue;
+      }
+      const record = data as Record<string, unknown>;
+      if (record["ok"] === true) {
+        return { ok: true, branch: typeof record["branch"] === "string" ? record["branch"] : "" };
+      }
+      if (record["ok"] === false) {
+        return { ok: false, error: typeof record["error"] === "string" ? record["error"] : "" };
+      }
+    }
+    return { ok: false, error: "提交超时：终端工具可能仍在运行，请检查网络后重试" };
+  }
+
+  private html(): string {
+    const nonce = String(Date.now());
+    return `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
+<style>
+/*
+ * 只用亮色：作答面板不跟随系统深浅色。
+ * 颜色写死成暖白一套，不读 --vscode-* 变量 —— 那套会跟着宿主主题变。
+ */
+html,body{background:#fbf7f1}
+*{box-sizing:border-box}
+body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;color:#2f2a26}
+:root{--accent:#e0771e;--accent-soft:rgba(224,119,30,.12);--muted:#6b6158;--faint:#9c9089;--line:#efe5da;--surface:#f7f2ec}
+.panel{display:flex;flex-direction:column;height:100vh;width:256px;max-width:100%}
+.body{flex:1 1 auto;overflow:auto;padding:12px 6px 8px}
+.body::-webkit-scrollbar{width:6px}
+.body::-webkit-scrollbar-thumb{background:rgba(47,42,38,.16);border-radius:3px}
+.group{display:flex;flex-direction:column;gap:6px;margin:0 0 12px}
+.group-title{padding:0 10px;color:var(--accent);font-size:13px;font-weight:600}
+.rows{display:flex;flex-direction:column;gap:6px;padding:0 10px}
+.row{display:flex;align-items:center;gap:8px;min-height:30px;line-height:1.25}
+.row-label{flex:0 0 64px;margin:0;font-size:12px;white-space:nowrap;color:var(--muted)}
+.row-value{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:6px;font-size:13px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+#countdown{font-variant-numeric:tabular-nums;font-size:15px;font-weight:600;color:#2f2a26}
+#countdown.is-over{color:#b42318}
+/* 题目列表：每行一个题号 + 题干首行，行高固定不跳动。 */
+.q-list{display:flex;flex-direction:column;gap:4px;padding:0 6px}
+.q-item{display:flex;align-items:center;gap:9px;width:100%;padding:7px 8px;border:0;border-radius:9px;background:none;color:#2f2a26;font:inherit;font-size:12.5px;text-align:left;cursor:pointer;transition:background-color 120ms ease}
+.q-item:hover{background:var(--surface)}
+.q-item:active{background:var(--accent-soft)}
+.q-no{flex:none;width:22px;height:22px;border-radius:6px;background:var(--accent-soft);color:var(--accent);font-size:11.5px;font-weight:700;display:flex;align-items:center;justify-content:center}
+.q-title{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.empty{padding:10px;color:var(--faint);font-size:12px;line-height:1.6}
+.foot{flex:none;display:flex;flex-direction:column;gap:6px;padding:10px 12px 14px;border-top:1px solid var(--line)}
+.submit-btn{width:100%;height:34px;border:0;border-radius:10px;background:linear-gradient(135deg,#e0771e,#c45a0d);color:#fff;font:inherit;font-size:13px;font-weight:650;cursor:pointer;box-shadow:0 8px 18px rgba(224,119,30,.24);transition:filter 120ms ease,transform 120ms ease}
+.submit-btn:hover:not(:disabled){filter:brightness(1.04)}
+.submit-btn:active:not(:disabled){transform:scale(.97)}
+.submit-btn:disabled{cursor:default;filter:none;opacity:.55;box-shadow:none}
+.submit-status{margin:0;font-size:11px;line-height:1.45;color:var(--faint);word-break:break-word}
+.submit-status.is-running{color:var(--accent)}
+.submit-status.is-error{color:#b42318}
+.submit-status[hidden]{display:none}
+.hidden{display:none !important}
+</style></head><body>
+<div class="panel">
+  <div class="body">
+    <div class="group" id="time-group">
+      <div class="group-title">剩余时间</div>
+      <div class="rows">
+        <div class="row"><span class="row-value"><span class="mono" id="countdown">--:--</span></span></div>
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-title" id="q-title">题目</div>
+      <div class="q-list" id="q-list"></div>
+      <div class="empty hidden" id="q-empty">还没有题目</div>
+    </div>
+  </div>
+  <div class="foot hidden" id="foot">
+    <button class="submit-btn" id="submit-btn" type="button">提交答卷</button>
+    <p class="submit-status" id="submit-status" hidden></p>
+  </div>
+</div>
+<script nonce="${nonce}">
+const vscode = acquireVsCodeApi();
+let model = null;
+let timer = null;
+let autoSubmitted = false;
+const $ = (id) => document.getElementById(id);
+const pad2 = (n) => (n < 10 ? "0" + n : String(n));
+
+function stopTimer(){ if (timer !== null) { clearInterval(timer); timer = null; } }
+
+function renderCountdown(){
+  const el = $("countdown");
+  if (!el || !model || !model.answering) return;
+  if (model.deadlineAtMs === null) { el.textContent = "不限时"; el.classList.remove("is-over"); return; }
+  const left = model.deadlineAtMs - Date.now();
+  if (left <= 0) {
+    el.textContent = "已到时";
+    el.classList.add("is-over");
+    if (!autoSubmitted) {
+      autoSubmitted = true;
+      const btn = $("submit-btn");
+      if (btn) btn.disabled = true;
+      vscode.postMessage({ type: "submit", auto: true });
+    }
+    return;
+  }
+  const total = Math.floor(left / 1000);
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+  el.textContent = h > 0 ? h + ":" + pad2(m) + ":" + pad2(s) : pad2(m) + ":" + pad2(s);
+}
+
+function startTimer(){
+  stopTimer();
+  if (!model || !model.answering) return;
+  renderCountdown();
+  timer = setInterval(renderCountdown, 1000);
+}
+
+function render(){
+  const on = !!model && model.answering;
+  $("foot").classList.toggle("hidden", !on);
+  $("time-group").classList.toggle("hidden", !on);
+  const list = $("q-list");
+  const empty = $("q-empty");
+  const title = $("q-title");
+  if (on && model.paperTitle) title.textContent = model.paperTitle;
+  const items = (model && model.questions) || [];
+  if (!on || items.length === 0) {
+    list.innerHTML = "";
+    empty.classList.toggle("hidden", !on);
+    return;
+  }
+  empty.classList.add("hidden");
+  list.innerHTML = items
+    .map((q) => {
+      const safeTitle = String(q.title || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+      return '<button class="q-item" type="button" data-number="' + q.number + '">' +
+        '<span class="q-no">' + q.number + '</span><span class="q-title">' + safeTitle + "</span></button>";
+    })
+    .join("");
+  startTimer();
+}
+
+function setSubmit(state, message){
+  const status = $("submit-status"), btn = $("submit-btn");
+  if (!status || !btn) return;
+  if (state === "running") { btn.disabled = true; status.hidden = false; status.className = "submit-status is-running"; status.textContent = message || "正在提交答卷…"; return; }
+  if (state === "failed") { btn.disabled = false; status.hidden = false; status.className = "submit-status is-error"; status.textContent = message || "提交失败"; return; }
+  if (state === "done") { btn.disabled = true; status.hidden = false; status.className = "submit-status"; status.textContent = message || "已提交"; return; }
+  status.hidden = true; status.className = "submit-status"; status.textContent = "";
+}
+
+window.addEventListener("message", (event) => {
+  const data = event.data;
+  if (!data) return;
+  if (data.type === "model") {
+    const next = data.model || null;
+    const changed = !model || !next ? true : model.deadlineAtMs !== next.deadlineAtMs;
+    model = next;
+    if (changed) autoSubmitted = false;
+    render();
+    return;
+  }
+  if (data.type === "submitProgress") setSubmit(data.state, data.message);
+});
+
+document.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!target || !target.closest) return;
+  const item = target.closest(".q-item");
+  if (item) {
+    vscode.postMessage({ type: "reveal", number: Number(item.dataset.number) });
+  }
+});
+
+$("submit-btn").onclick = () => { const btn = $("submit-btn"); if (!btn.disabled) { btn.disabled = true; vscode.postMessage({ type: "submit", auto: false }); } };
+render();
+vscode.postMessage({ type: "ready" });
+</script></body></html>`;
+  }
+}
+
+/** `workspace.conf` 里第一篇试卷的相对路径。 */
+const paperPathOf = (conf: string): string => {
+  const match = /^\s*content:\s*(?:"([^"]+)"|'([^']+)'|([^\s#]+))\s*$/m.exec(conf);
+  return (match?.[1] ?? match?.[2] ?? match?.[3] ?? "").trim();
+};
+
+/** 试卷标题：frontmatter 的 `title`，读不到用文件名。 */
+const paperTitleOf = (paper: string, path: string): string => {
+  const front = /^---[\s\S]*?\n---/.exec(paper)?.[0] ?? "";
+  const title = /^title:\s*(?:"([^"]+)"|'([^']+)'|([^\s#]+))\s*$/m.exec(front);
+  const value = (title?.[1] ?? title?.[2] ?? title?.[3] ?? "").trim();
+  if (value.length > 0) {
+    return value;
+  }
+  return (path.split("/").pop() ?? "").replace(/\.paper$/i, "");
+};
+
+/**
+ * 题目列表：按卷面顺序取每个 `:::type#N` 块的题号与题干首行。
+ *
+ * <p>只做「能列出题号与标题」这件事，完整解析归试卷扩展。
+ */
+const parseQuestions = (paper: string): QuestionItem[] => {
+  const items: QuestionItem[] = [];
+  const blockRegex = /^:::([a-z-]+)#(\d+)\s*$/gm;
+  let previousIndex = 0;
+  let match: RegExpExecArray | null = blockRegex.exec(paper);
+  while (match !== null) {
+    const number = Number(match[2]);
+    const before = paper.slice(previousIndex, match.index);
+    const title = firstLineOf(stemOf(before));
+    items.push({ number, title: title.length > 0 ? title : `第 ${String(number)} 题` });
+    previousIndex = match.index + match[0].length;
+    match = blockRegex.exec(paper);
+  }
+  return items;
+};
+
+/** 去掉 frontmatter、分组标题与空行，留下题干正文。 */
+const stemOf = (before: string): string => {
+  const body = before.replace(/^---[\s\S]*?\n---\s*/, "");
+  const heading = body.lastIndexOf("\n## ");
+  const scoped = heading >= 0 ? body.slice(heading + 1) : body;
+  return scoped
+    .split(/\r?\n/)
+    .filter((line) => !/^#{1,6}\s/.test(line.trim()) && !/^---\s*$/.test(line.trim()))
+    .join("\n");
+};
+
+/** 题干首行：跳过空行与列表 / 图片这类非文字行。 */
+const firstLineOf = (text: string): string => {
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (
+      line.length === 0 ||
+      /^:::/.test(line) ||
+      /^[-*+]\s/.test(line) ||
+      /^!\[/.test(line) ||
+      /^```/.test(line)
+    ) {
+      continue;
+    }
+    return line.replace(/^>\s*/, "").replace(/^\d+[.)]\s*/, "").slice(0, 60);
+  }
+  return "";
+};
+
+/**
+ * 左侧默认视图是出题方的考试面板（模板里静态写的 `sumi.defaultView.left`），
+ * 而活动栏默认隐藏、学生没有图标可点 —— 检测到这是作答工作区（有会话文件）时，
+ * 主动把左侧切到本面板。只切一次，之后尊重用户自己的选择。
+ */
+const switchLeftView = async (): Promise<boolean> => {
+  const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
+  if (folder === undefined) {
+    return false;
+  }
+  try {
+    await vscode.workspace.fs.stat(vscode.Uri.joinPath(folder, ".sumi", "exam-session.json"));
+  } catch {
+    return false;
+  }
+  try {
+    await vscode.commands.executeCommand("workbench.view.extension.numas.exam.answer");
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export function activate(context: vscode.ExtensionContext): void {
+  context.subscriptions.push(vscode.window.registerWebviewViewProvider(VIEW_ID, new AnswerProvider()));
+  /*
+   * 稍等一拍：工作区与视图容器要先建好，命令才能切过去。
+   * 没切成功就再试一次 —— 前一次可能发生在视图注册之前。
+   */
+  const attempt = (remaining: number): void => {
+    if (remaining <= 0) {
+      return;
+    }
+    void switchLeftView().then((done) => {
+      if (!done) {
+        setTimeout(() => attempt(remaining - 1), 1200);
+      }
+    });
+  };
+  setTimeout(() => attempt(3), 800);
+}
