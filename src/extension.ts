@@ -54,6 +54,8 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
   private view: vscode.WebviewView | undefined;
   private timer: NodeJS.Timeout | undefined;
   private submitting = false;
+  /** 是否已经主动把左侧切到作答面板；只切一次，之后尊重用户选择。 */
+  private switched = false;
 
   dispose(): void {
     if (this.timer !== undefined) {
@@ -63,7 +65,26 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
+    /*
+     * 页面刷新 / 视图重建时，旧视图会被销毁但扩展实例还在：
+     * 旧定时器如果继续跑，postMessage 会打在 null 上（实测每 4 秒一条
+     * `Cannot read properties of null (reading 'postMessage')`）。
+     */
+    if (this.timer !== undefined) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+    this.switched = false;
     this.view = view;
+    view.onDidDispose(() => {
+      if (this.view === view) {
+        this.view = undefined;
+      }
+      if (this.timer !== undefined) {
+        clearInterval(this.timer);
+        this.timer = undefined;
+      }
+    });
     view.webview.options = { enableScripts: true };
     view.webview.html = this.html();
     view.webview.onDidReceiveMessage((message: unknown) => {
@@ -112,14 +133,31 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
   }
 
   private post(message: unknown): void {
-    void this.view?.webview.postMessage(message);
+    const webview = this.view?.webview;
+    if (webview === undefined || webview === null) {
+      return;
+    }
+    void webview.postMessage(message);
   }
 
   private async refresh(): Promise<void> {
     if (this.view === undefined) {
       return;
     }
-    this.post({ type: "model", model: await this.load() });
+    const model = await this.load();
+    this.post({ type: "model", model });
+    /*
+     * 进入工具是在 IDE 起来之后才写 role 的，扩展激活时可能还没写成；
+     * 这里在**确认作答身份之后**再切一次，避免「面板有数据但左侧还停在考试面板」。
+     */
+    if (model.answering && !this.switched) {
+      this.switched = true;
+      try {
+        await vscode.commands.executeCommand("workbench.view.extension.numas.exam.answer");
+      } catch {
+        this.switched = false;
+      }
+    }
   }
 
   /** 组装面板数据；没有会话文件说明不是作答工作区。 */
@@ -149,7 +187,11 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
         : await this.read(vscode.Uri.joinPath(folder, ...paperPath.split("/")));
     return {
       answering: true,
-      deadlineAtMs: session.deadlineAt.length === 0 ? null : Date.parse(session.deadlineAt),
+      /* 解析不出来按不限时处理，避免卷面出现 NaN:NaN:NaN。 */
+      deadlineAtMs:
+        session.deadlineAt.length === 0 || !Number.isFinite(Date.parse(session.deadlineAt))
+          ? null
+          : Date.parse(session.deadlineAt),
       branch: await this.branch(folder),
       questions: paper === undefined ? [] : parseQuestions(paper),
       paperTitle: paper === undefined ? "" : paperTitleOf(paper, paperPath),
@@ -377,6 +419,11 @@ function render(){
   const empty = $("q-empty");
   const title = $("q-title");
   if (on && model.paperTitle) title.textContent = model.paperTitle;
+  /*
+   * 倒计时先跑起来：试卷还没解析出来（题目为空）时也要计时，
+   * 不能等题目出现才开始算 —— 那会让「已进入」的前几秒不计入考试。
+   */
+  if (on) startTimer();
   const items = (model && model.questions) || [];
   if (!on || items.length === 0) {
     list.innerHTML = "";
