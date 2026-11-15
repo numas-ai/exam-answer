@@ -236,6 +236,32 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
   }
 
   /**
+   * 回到试卷：工程题打开项目文件后，卷面页签会被挤到后台。
+   *
+   * <p>按 `workspace.conf` 的 `content:` 找到当前试卷，调试卷扩展的
+   * `numas.paper.open`（与 webapp / 其它扩展同一入口），把卷面重新拉到前台。
+   */
+  private async backToPaper(): Promise<void> {
+    const folder = this.folder();
+    if (folder === undefined) {
+      return;
+    }
+    const conf = await this.read(vscode.Uri.joinPath(folder, ...CONF_FILE.split("/")));
+    const paperPath = conf === undefined ? "" : paperPathOf(conf);
+    if (paperPath.length === 0) {
+      return;
+    }
+    const uri = vscode.Uri.joinPath(folder, ...paperPath.split("/")).toString();
+    try {
+      await vscode.commands.executeCommand("numas.paper.open", uri);
+    } catch (error) {
+      void vscode.window.showWarningMessage(
+        `打开试卷失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
    * 交卷：起终端跑工作区自带的 `repo-submit.mjs`，把改动 commit 并 push 到当前分支。
    *
    * <p>不在这里另写一套提交：排除项与 push 规则都在工具里。
@@ -344,10 +370,12 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
 .q-title{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .empty{padding:10px;color:var(--faint);font-size:12px;line-height:1.6}
 .foot{flex:none;display:flex;flex-direction:column;gap:6px;padding:10px 12px 14px;border-top:1px solid var(--line)}
-.submit-btn{width:100%;height:34px;border:0;border-radius:10px;background:linear-gradient(135deg,#e0771e,#c45a0d);color:#fff;font:inherit;font-size:13px;font-weight:650;cursor:pointer;box-shadow:0 8px 18px rgba(224,119,30,.24);transition:filter 120ms ease,transform 120ms ease}
-.submit-btn:hover:not(:disabled){filter:brightness(1.04)}
-.submit-btn:active:not(:disabled){transform:scale(.97)}
-.submit-btn:disabled{cursor:default;filter:none;opacity:.55;box-shadow:none}
+/* 与 exam-panel 的「发布考试」同一套按钮：32px / 9px 圆角 / 实色 accent / 600。 */
+.foot-btn{width:100%;height:32px;border:0;border-radius:9px;background:var(--accent);color:#fff;font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:transform .16s cubic-bezier(.2,.8,.2,1),filter .15s ease}
+.foot-btn:hover:not(:disabled){filter:brightness(.94)}
+.foot-btn:active:not(:disabled){transform:scale(.95);filter:brightness(.88);transition-duration:.08s}
+.foot-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.foot-btn:disabled{cursor:default;filter:none;opacity:.6;transform:none}
 .submit-status{margin:0;font-size:11px;line-height:1.45;color:var(--faint);word-break:break-word}
 .submit-status.is-running{color:var(--accent)}
 .submit-status.is-error{color:#b42318}
@@ -369,7 +397,8 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
     </div>
   </div>
   <div class="foot hidden" id="foot">
-    <button class="submit-btn" id="submit-btn" type="button">提交答卷</button>
+    <button class="foot-btn" id="back-paper" type="button">返回试卷</button>
+    <button class="foot-btn" id="submit-btn" type="button">提交答卷</button>
     <p class="submit-status" id="submit-status" hidden></p>
   </div>
 </div>
@@ -473,6 +502,7 @@ document.addEventListener("click", (event) => {
   }
 });
 
+$("back-paper").onclick = () => { vscode.postMessage({ type: "backToPaper" }); };
 $("submit-btn").onclick = () => { const btn = $("submit-btn"); if (!btn.disabled) { btn.disabled = true; vscode.postMessage({ type: "submit", auto: false }); } };
 render();
 vscode.postMessage({ type: "ready" });
