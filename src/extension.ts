@@ -253,6 +253,11 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
     }
     const uri = vscode.Uri.joinPath(folder, ...paperPath.split("/")).toString();
     try {
+      /*
+       * 先退出工程题的项目模式：试卷扩展会把资源管理器根目录、左栏视图和卷面
+       * 一起恢复；再打开试卷，把卷面标签页拉到前台。
+       */
+      await vscode.commands.executeCommand("numas.paper.exitProject").then(undefined, () => undefined);
       await vscode.commands.executeCommand("numas.paper.open", uri);
     } catch (error) {
       void vscode.window.showWarningMessage(
