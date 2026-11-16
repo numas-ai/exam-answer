@@ -303,6 +303,19 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
   }
 
   /**
+   * 打开试卷并锚定到题目：先走 `backToPaper`（退出项目模式 / 聚焦卷面），
+   * 再让试卷扩展滚到对应题卡。只发 reveal 不打开的话，卷面在后台时用户看不到。
+   */
+  private async revealQuestion(number: number): Promise<void> {
+    await this.backToPaper();
+    try {
+      await vscode.commands.executeCommand("numas.paper.reveal", String(number));
+    } catch {
+      /* 试卷扩展未就绪：打开动作已经完成，用户仍能看到卷面。 */
+    }
+  }
+
+  /**
    * 回到试卷：工程题打开项目文件后，卷面页签会被挤到后台。
    *
    * <p>按 `workspace.conf` 的 `content:` 找到当前试卷，调试卷扩展的
@@ -433,15 +446,20 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
 #countdown{font-variant-numeric:tabular-nums;font-size:15px;font-weight:600;color:#2f2a26}
 #countdown.is-over{color:#b42318}
-/* 题目列表：每行一个题号 + 题干首行，行高固定不跳动。 */
-.q-list{display:flex;flex-direction:column;gap:4px;padding:0 6px}
-.q-item{display:flex;align-items:center;gap:9px;width:100%;padding:7px 8px;border:0;border-radius:9px;background:none;color:#2f2a26;font:inherit;font-size:12.5px;text-align:left;cursor:pointer;transition:background-color 120ms ease}
-.q-item:hover{background:var(--surface)}
-.q-item:active{background:var(--accent-soft)}
-.q-no{flex:none;width:22px;height:22px;border-radius:6px;background:var(--accent-soft);color:var(--accent);font-size:11.5px;font-weight:700;display:flex;align-items:center;justify-content:center}
-.q-title{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 试卷分组栏：左标题、右「打开」，与 exam-panel 同款。 */
+.paper-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 10px;margin:0 0 6px}
+.paper-head__title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--accent);font-size:13px;font-weight:600}
+.paper-head__open{flex:none;padding:2px 0;border:0;background:none;color:var(--accent);font:inherit;font-size:12px;font-weight:600;cursor:pointer}
+.paper-head__open:hover{text-decoration:underline;text-underline-offset:3px}
+/* 题号：48px 方形按钮网格，与 exam-panel 一致。 */
+.q-grid{display:grid;grid-template-columns:repeat(4,48px);justify-content:space-between;gap:8px;padding:0 10px}
+.q-card{width:48px;height:48px;border:0;border-radius:10px;background:var(--accent-soft);color:var(--accent);font:inherit;font-size:14px;font-weight:600;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform .16s cubic-bezier(.2,.8,.2,1),background-color .15s ease,color .15s ease}
+.q-card:hover{background:var(--accent);color:#fff;transform:translateY(-1px) scale(1)}
+.q-card:active{background:var(--accent);color:#fff;transform:translateY(0) scale(.92);transition-duration:.08s}
+.q-card:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .empty{padding:10px;color:var(--faint);font-size:12px;line-height:1.6}
-.foot{flex:none;display:flex;flex-direction:column;gap:6px;padding:10px 12px 14px;border-top:1px solid var(--line)}
+/* 与 exam-panel 的 foot 同款：4px 上边距、12px 下边距、无 1px 分隔线。 */
+.foot{flex:none;display:flex;flex-direction:column;gap:6px;padding:4px 12px 12px}
 /* 与 exam-panel 的「发布考试」同一套按钮：32px / 9px 圆角 / 实色 accent / 600。 */
 .foot-btn{width:100%;height:32px;border:0;border-radius:9px;background:var(--accent);color:#fff;font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:transform .16s cubic-bezier(.2,.8,.2,1),filter .15s ease}
 .foot-btn:hover:not(:disabled){filter:brightness(.94)}
@@ -463,8 +481,11 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
       </div>
     </div>
     <div class="group">
-      <div class="group-title" id="q-title">题目</div>
-      <div class="q-list" id="q-list"></div>
+      <div class="paper-head">
+        <span class="paper-head__title" id="q-title">题目</span>
+        <button class="paper-head__open" id="open-paper" type="button">打开</button>
+      </div>
+      <div class="q-grid" id="q-list"></div>
       <div class="empty hidden" id="q-empty">还没有题目</div>
     </div>
   </div>
@@ -481,6 +502,7 @@ let timer = null;
 let autoSubmitted = false;
 const $ = (id) => document.getElementById(id);
 const pad2 = (n) => (n < 10 ? "0" + n : String(n));
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 function stopTimer(){ if (timer !== null) { clearInterval(timer); timer = null; } }
 
@@ -541,11 +563,7 @@ function render(){
   }
   empty.classList.add("hidden");
   list.innerHTML = items
-    .map((q) => {
-      const safeTitle = String(q.title || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-      return '<button class="q-item" type="button" data-number="' + q.number + '">' +
-        '<span class="q-no">' + q.number + '</span><span class="q-title">' + safeTitle + "</span></button>";
-    })
+    .map((q) => '<button class="q-card" type="button" data-number="' + q.number + '" title="' + esc(q.title) + '">' + q.number + "</button>")
     .join("");
   startTimer();
 }
@@ -576,9 +594,13 @@ window.addEventListener("message", (event) => {
 document.addEventListener("click", (event) => {
   const target = event.target;
   if (!target || !target.closest) return;
-  const item = target.closest(".q-item");
+  const item = target.closest(".q-card");
   if (item) {
     vscode.postMessage({ type: "reveal", number: Number(item.dataset.number) });
+    return;
+  }
+  if (target.closest("#open-paper")) {
+    vscode.postMessage({ type: "openPaper" });
   }
 });
 
