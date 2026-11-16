@@ -87,6 +87,8 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
   private switched = false;
   /** 老师身份下是否已经把左栏切回考试面板。 */
   private teacherViewRestored = false;
+  /** 最近一次解析到的试卷 URI：工程题切根 / 页面状态变化后仍能直接打开。 */
+  private paperUri: vscode.Uri | undefined;
 
   dispose(): void {
     if (this.timer !== undefined) {
@@ -235,6 +237,9 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
     }
     const conf = await this.read(vscode.Uri.joinPath(folder, ...CONF_FILE.split("/")));
     const paperPath = conf === undefined ? "" : paperPathOf(conf);
+    if (paperPath.length > 0) {
+      this.paperUri = vscode.Uri.joinPath(folder, ...paperPath.split("/"));
+    }
     const paper =
       paperPath.length === 0
         ? undefined
@@ -323,22 +328,28 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
    */
   private async backToPaper(): Promise<void> {
     const folder = await resolveExamRoot();
-    if (folder === undefined) {
+    let uri = this.paperUri;
+    if (uri === undefined && folder !== undefined) {
+      const conf = await this.read(vscode.Uri.joinPath(folder, ...CONF_FILE.split("/")));
+      const paperPath = conf === undefined ? "" : paperPathOf(conf);
+      if (paperPath.length > 0) {
+        uri = vscode.Uri.joinPath(folder, ...paperPath.split("/"));
+      }
+    }
+    if (uri === undefined) {
       return;
     }
-    const conf = await this.read(vscode.Uri.joinPath(folder, ...CONF_FILE.split("/")));
-    const paperPath = conf === undefined ? "" : paperPathOf(conf);
-    if (paperPath.length === 0) {
-      return;
-    }
-    const uri = vscode.Uri.joinPath(folder, ...paperPath.split("/")).toString();
     try {
       /*
        * 先退出工程题的项目模式：试卷扩展会把资源管理器根目录、左栏视图和卷面
        * 一起恢复；再打开试卷，把卷面标签页拉到前台。
        */
       await vscode.commands.executeCommand("numas.paper.exitProject").then(undefined, () => undefined);
-      await vscode.commands.executeCommand("numas.paper.open", uri);
+      await vscode.commands.executeCommand("numas.paper.open", uri.toString());
+      /* 中间编辑区没标签时 webapp 会收成 0；打开后再显式聚焦，确保卷面可见。 */
+      await vscode.commands
+        .executeCommand("editor.focusActiveEditorGroup")
+        .then(undefined, () => undefined);
     } catch (error) {
       void vscode.window.showWarningMessage(
         `打开试卷失败：${error instanceof Error ? error.message : String(error)}`,
