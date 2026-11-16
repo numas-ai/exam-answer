@@ -42,6 +42,32 @@ type ViewModel = {
   readonly paperTitle: string;
 };
 
+/**
+ * 解析考试工作区根。
+ *
+ * <p>工程题会把 `vscode.workspace.workspaceFolders` 切到 `project/`，
+ * 这时 `.sumi/exam-session.json`、`workspace.conf`、提交工具都不在当前根下，
+ * 直接读会得到「没有会话 → 面板消失 / 返回试卷空转」。
+ * 从当前根向上找带会话文件的目录，最多 6 层。
+ */
+const resolveExamRoot = async (): Promise<vscode.Uri | undefined> => {
+  let current = vscode.workspace.workspaceFolders?.[0]?.uri;
+  for (let depth = 0; current !== undefined && depth < 6; depth += 1) {
+    try {
+      await vscode.workspace.fs.stat(vscode.Uri.joinPath(current, ...SESSION_FILE.split("/")));
+      return current;
+    } catch {
+      /* 当前层没有会话文件，继续向上。 */
+    }
+    const parent = vscode.Uri.joinPath(current, "..");
+    if (parent.toString() === current.toString()) {
+      break;
+    }
+    current = parent;
+  }
+  return undefined;
+};
+
 const EMPTY: ViewModel = {
   answering: false,
   deadlineAtMs: null,
@@ -116,10 +142,6 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
     void this.refresh();
   }
 
-  private folder(): vscode.Uri | undefined {
-    return vscode.workspace.workspaceFolders?.[0]?.uri;
-  }
-
   private async read(uri: vscode.Uri): Promise<string | undefined> {
     try {
       return new TextDecoder("utf-8").decode(await vscode.workspace.fs.readFile(uri));
@@ -162,7 +184,7 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
 
   /** 组装面板数据；没有会话文件说明不是作答工作区。 */
   private async load(): Promise<ViewModel> {
-    const folder = this.folder();
+    const folder = await resolveExamRoot();
     if (folder === undefined) {
       return EMPTY;
     }
@@ -242,7 +264,7 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
    * `numas.paper.open`（与 webapp / 其它扩展同一入口），把卷面重新拉到前台。
    */
   private async backToPaper(): Promise<void> {
-    const folder = this.folder();
+    const folder = await resolveExamRoot();
     if (folder === undefined) {
       return;
     }
@@ -275,7 +297,7 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
     if (this.submitting) {
       return;
     }
-    const folder = this.folder();
+    const folder = await resolveExamRoot();
     if (folder === undefined) {
       throw new Error("当前工作区不可用");
     }
@@ -605,7 +627,7 @@ const readRole = async (folder: vscode.Uri): Promise<string> => {
  * 主动把左侧切到本面板。只切一次，之后尊重用户自己的选择。
  */
 const switchLeftView = async (): Promise<boolean> => {
-  const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
+  const folder = await resolveExamRoot();
   if (folder === undefined) {
     return false;
   }
