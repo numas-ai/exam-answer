@@ -85,6 +85,8 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
   private submitting = false;
   /** 是否已经主动把左侧切到作答面板；只切一次，之后尊重用户选择。 */
   private switched = false;
+  /** 老师身份下是否已经把左栏切回考试面板。 */
+  private teacherViewRestored = false;
 
   dispose(): void {
     if (this.timer !== undefined) {
@@ -178,6 +180,22 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
      * 进入工具是在 IDE 起来之后才写 role 的，扩展激活时可能还没写成；
      * 这里在**确认作答身份之后**再切一次，避免「面板有数据但左侧还停在考试面板」。
      */
+    if (!model.answering && !this.teacherViewRestored) {
+      const folder = await resolveExamRoot();
+      if (folder !== undefined) {
+        const role = await readRole(folder);
+        const branch = await readBranch(folder);
+        /* 只有明确是老师（或主分支）才切考试面板；会话还没写时不抢学生的视图。 */
+        if (role === "teacher" || branch === "main") {
+          this.teacherViewRestored = true;
+          try {
+            await vscode.commands.executeCommand("workbench.view.extension.numas.exam.panel");
+          } catch {
+            this.teacherViewRestored = false;
+          }
+        }
+      }
+    }
     if (model.answering && !this.switched) {
       this.switched = true;
       try {
@@ -205,6 +223,14 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
      * 也不能让出题方看见学生的倒计时与交卷入口。
      */
     if (session.role !== "student") {
+      return EMPTY;
+    }
+    /*
+     * 主分支是老师的仓。即使会话被历史/模拟写成了 student，
+     * 也不能在主分支上出作答面板 —— 这是最后一道兜底。
+     */
+    const branch = await this.branch(folder);
+    if (branch.length === 0 || branch === "main") {
       return EMPTY;
     }
     const conf = await this.read(vscode.Uri.joinPath(folder, ...CONF_FILE.split("/")));
@@ -631,6 +657,18 @@ const firstLineOf = (text: string): string => {
   return "";
 };
 
+/** 当前分支短名；读不到返回空串。 */
+const readBranch = async (folder: vscode.Uri): Promise<string> => {
+  try {
+    const raw = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(folder, ".git", "HEAD"));
+    const text = new TextDecoder().decode(raw);
+    const ref = /^ref:\s*refs\/heads\/(.+)\s*$/m.exec(text);
+    return ref === null ? "" : (ref[1] ?? "").trim();
+  } catch {
+    return "";
+  }
+};
+
 /** 读进入工具写下的 role；没有会话文件或字段时返回空串。 */
 const readRole = async (folder: vscode.Uri): Promise<string> => {
   try {
@@ -666,6 +704,10 @@ const switchLeftView = async (): Promise<boolean> => {
   /* 只有学生才切到作答面板：老师那边是本扩展不该抢的位置。 */
   const role = await readRole(folder);
   if (role !== "student") {
+    return false;
+  }
+  const branch = await readBranch(folder);
+  if (branch.length === 0 || branch === "main") {
     return false;
   }
   try {
