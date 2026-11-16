@@ -490,7 +490,6 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
     </div>
   </div>
   <div class="foot hidden" id="foot">
-    <button class="foot-btn" id="back-paper" type="button">返回试卷</button>
     <button class="foot-btn" id="submit-btn" type="button">提交作答</button>
     <p class="submit-status" id="submit-status" hidden></p>
   </div>
@@ -543,7 +542,6 @@ function render(){
    * 卷面（URL 不带题目）只给「提交作答」；进入题目（URL 带题目段）只给「返回试卷」。
    * 两个动作不在同一屏出现，避免学生没作答就交卷 / 在题目里找不到回卷入口。
    */
-  $("back-paper").classList.toggle("hidden", !inQuestion);
   $("submit-btn").classList.toggle("hidden", !on || inQuestion);
   $("submit-status").classList.toggle("hidden", inQuestion || $("submit-status").dataset.hidden === "1");
   const list = $("q-list");
@@ -604,7 +602,6 @@ document.addEventListener("click", (event) => {
   }
 });
 
-$("back-paper").onclick = () => { vscode.postMessage({ type: "backToPaper" }); };
 $("submit-btn").onclick = () => { const btn = $("submit-btn"); if (!btn.disabled) { btn.disabled = true; vscode.postMessage({ type: "submit", auto: false }); } };
 render();
 vscode.postMessage({ type: "ready" });

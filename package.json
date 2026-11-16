@@ -3,7 +3,7 @@
   "displayName": "考试作答",
   "description": "学生侧左侧面板：作答倒计时、题目列表与交卷。",
   "publisher": "numas",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "license": "MIT",
   "engines": {
     "vscode": "^1.75.0",
