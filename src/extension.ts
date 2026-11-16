@@ -142,6 +142,9 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       }
     });
     this.timer = setInterval(() => void this.refresh(), REFRESH_MS);
+    /* 打开工程题 / 返回试卷会切换 activeTextEditor：立即刷新按钮，不等 4 秒轮询。 */
+    const activeListener = vscode.window.onDidChangeActiveTextEditor(() => void this.refresh());
+    view.onDidDispose(() => activeListener.dispose());
     void this.refresh();
   }
 
@@ -211,11 +214,17 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
         ? undefined
         : await this.read(vscode.Uri.joinPath(folder, ...paperPath.split("/")));
     /*
-     * 工程题会把 workspaceFolders 切到 project/；这就是「进入题目」。
-     * 卷面（考试根）只给提交作答，题目视图只给返回试卷。
+     * 题目视图的判据：当前激活的是考试根下的普通文件（工程题默认文件，如 analyzer.js），
+     * 不是试卷自定义编辑器。学生工程题不再切 workspace 根（paper 0.5.51），
+     * 所以不能再用「当前根 != 考试根」判断。
      */
-    const currentRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
-    const inQuestion = currentRoot !== undefined && currentRoot.toString() !== folder.toString();
+    const active = vscode.window.activeTextEditor?.document.uri;
+    const inQuestion =
+      active !== undefined &&
+      active.scheme === "file" &&
+      active.toString() !== folder.toString() &&
+      active.fsPath.startsWith(`${folder.fsPath}/`) &&
+      !/\.paper$/i.test(active.fsPath);
     return {
       answering: true,
       inQuestion,
