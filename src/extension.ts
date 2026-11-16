@@ -37,6 +37,8 @@ type ViewModel = {
   readonly deadlineAtMs: number | null;
   /** 当前分支（提交要 push 到它）。 */
   readonly branch: string;
+  /** 是否在工程题 / 项目视图（URL 带题目段）。 */
+  readonly inQuestion: boolean;
   readonly questions: readonly QuestionItem[];
   /** 试卷标题。 */
   readonly paperTitle: string;
@@ -72,6 +74,7 @@ const EMPTY: ViewModel = {
   answering: false,
   deadlineAtMs: null,
   branch: "",
+  inQuestion: false,
   questions: [],
   paperTitle: "",
 };
@@ -207,8 +210,15 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       paperPath.length === 0
         ? undefined
         : await this.read(vscode.Uri.joinPath(folder, ...paperPath.split("/")));
+    /*
+     * 工程题会把 workspaceFolders 切到 project/；这就是「进入题目」。
+     * 卷面（考试根）只给提交作答，题目视图只给返回试卷。
+     */
+    const currentRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+    const inQuestion = currentRoot !== undefined && currentRoot.toString() !== folder.toString();
     return {
       answering: true,
+      inQuestion,
       /* 解析不出来按不限时处理，避免卷面出现 NaN:NaN:NaN。 */
       deadlineAtMs:
         session.deadlineAt.length === 0 || !Number.isFinite(Date.parse(session.deadlineAt))
@@ -305,7 +315,7 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       throw new Error(`工作区里没有提交工具（${SUBMIT_TOOL_PATH}）`);
     }
     this.submitting = true;
-    this.post({ type: "submitProgress", state: "running", message: auto ? "正在自动提交…" : "正在提交答卷…" });
+    this.post({ type: "submitProgress", state: "running", message: auto ? "正在自动提交…" : "正在提交作答…" });
     try {
       const stateUri = vscode.Uri.joinPath(folder, ...SUBMIT_STATE_PATH.split("/"));
       await vscode.workspace.fs.delete(stateUri, { useTrash: false }).then(undefined, () => undefined);
@@ -425,7 +435,7 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
   </div>
   <div class="foot hidden" id="foot">
     <button class="foot-btn" id="back-paper" type="button">返回试卷</button>
-    <button class="foot-btn" id="submit-btn" type="button">提交答卷</button>
+    <button class="foot-btn" id="submit-btn" type="button">提交作答</button>
     <p class="submit-status" id="submit-status" hidden></p>
   </div>
 </div>
@@ -469,8 +479,16 @@ function startTimer(){
 
 function render(){
   const on = !!model && model.answering;
+  const inQuestion = on && model.inQuestion === true;
   $("foot").classList.toggle("hidden", !on);
   $("time-group").classList.toggle("hidden", !on);
+  /*
+   * 卷面（URL 不带题目）只给「提交作答」；进入题目（URL 带题目段）只给「返回试卷」。
+   * 两个动作不在同一屏出现，避免学生没作答就交卷 / 在题目里找不到回卷入口。
+   */
+  $("back-paper").classList.toggle("hidden", !inQuestion);
+  $("submit-btn").classList.toggle("hidden", !on || inQuestion);
+  $("submit-status").classList.toggle("hidden", inQuestion || $("submit-status").dataset.hidden === "1");
   const list = $("q-list");
   const empty = $("q-empty");
   const title = $("q-title");
@@ -500,10 +518,10 @@ function render(){
 function setSubmit(state, message){
   const status = $("submit-status"), btn = $("submit-btn");
   if (!status || !btn) return;
-  if (state === "running") { btn.disabled = true; status.hidden = false; status.className = "submit-status is-running"; status.textContent = message || "正在提交答卷…"; return; }
-  if (state === "failed") { btn.disabled = false; status.hidden = false; status.className = "submit-status is-error"; status.textContent = message || "提交失败"; return; }
-  if (state === "done") { btn.disabled = true; status.hidden = false; status.className = "submit-status"; status.textContent = message || "已提交"; return; }
-  status.hidden = true; status.className = "submit-status"; status.textContent = "";
+  if (state === "running") { btn.disabled = true; status.dataset.hidden = "0"; status.hidden = false; status.className = "submit-status is-running"; status.textContent = message || "正在提交作答…"; return; }
+  if (state === "failed") { btn.disabled = false; status.dataset.hidden = "0"; status.hidden = false; status.className = "submit-status is-error"; status.textContent = message || "提交失败"; return; }
+  if (state === "done") { btn.disabled = true; status.dataset.hidden = "0"; status.hidden = false; status.className = "submit-status"; status.textContent = message || "已提交"; return; }
+  status.dataset.hidden = "1"; status.hidden = true; status.className = "submit-status"; status.textContent = "";
 }
 
 window.addEventListener("message", (event) => {
