@@ -30,6 +30,17 @@ type QuestionItem = {
   readonly title: string;
 };
 
+type GradeItem = {
+  /** 卷面题号（frontmatter `grades` 的键）。 */
+  readonly number: string;
+  /** 得分；null = 老师还没给分。 */
+  readonly score: number | null;
+  /** 老师评语。 */
+  readonly comment: string;
+  /** 该题满分（frontmatter `scores`）；缺省 0。 */
+  readonly max: number;
+};
+
 type ViewModel = {
   /** 是否处于作答工作区（没有会话文件时为 false）。 */
   readonly answering: boolean;
@@ -42,6 +53,12 @@ type ViewModel = {
   readonly questions: readonly QuestionItem[];
   /** 试卷标题。 */
   readonly paperTitle: string;
+  /** 老师写入的成绩；没有 grades 或还没评分时为空数组。 */
+  readonly grades: readonly GradeItem[];
+  /** 是否已经出分（任一题有分数或评语）。 */
+  readonly graded: boolean;
+  readonly gradeTotal: number;
+  readonly gradeMax: number;
 };
 
 /**
@@ -77,6 +94,10 @@ const EMPTY: ViewModel = {
   inQuestion: false,
   questions: [],
   paperTitle: "",
+  grades: [],
+  graded: false,
+  gradeTotal: 0,
+  gradeMax: 0,
 };
 
 export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -218,6 +239,19 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       active.toString() !== folder.toString() &&
       active.fsPath.startsWith(`${folder.fsPath}/`) &&
       !/\.paper$/i.test(active.fsPath);
+    const frontmatter = paper === undefined ? "" : (/^---[\s\S]*?\n---/.exec(paper)?.[0] ?? "");
+    const scores = parseScores(frontmatter);
+    const rawGrades = parseGrades(frontmatter);
+    const numbers = [...new Set([...scores.keys(), ...rawGrades.keys()])].sort(
+      (left, right) => Number(left) - Number(right),
+    );
+    const grades: GradeItem[] = numbers.map((number) => ({
+      number,
+      score: rawGrades.get(number)?.score ?? null,
+      comment: rawGrades.get(number)?.comment ?? "",
+      max: scores.get(number) ?? 0,
+    }));
+    const graded = grades.some((item) => item.score !== null || item.comment.length > 0);
     return {
       answering: true,
       inQuestion,
@@ -229,6 +263,10 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       branch: await this.branch(folder),
       questions: paper === undefined ? [] : parseQuestions(paper),
       paperTitle: paper === undefined ? "" : paperTitleOf(paper, paperPath),
+      grades,
+      graded,
+      gradeTotal: grades.reduce((sum, item) => sum + (item.score ?? 0), 0),
+      gradeMax: grades.reduce((sum, item) => sum + item.max, 0),
     };
   }
 
@@ -452,6 +490,13 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
 .submit-status.is-running{color:var(--accent)}
 .submit-status.is-error{color:#b42318}
 .submit-status[hidden]{display:none}
+/* 成绩：老师阅卷后写进 .paper frontmatter，学生在这里看分数与评语。 */
+.grade-item{margin:0 10px;padding:7px 0;border-top:1px solid var(--line)}
+.grade-item:first-child{border-top:0}
+.grade-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:12px;color:var(--muted)}
+.grade-score{color:var(--accent);font-weight:600;font-variant-numeric:tabular-nums}
+.grade-comment{margin-top:2px;font-size:12px;line-height:1.5;color:#2f2a26;word-break:break-word}
+.grade-total{color:var(--accent);font-size:14px;font-weight:600;font-variant-numeric:tabular-nums}
 .hidden{display:none !important}
 </style></head><body>
 <div class="panel">
@@ -461,6 +506,13 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
       <div class="rows">
         <div class="row"><span class="row-value"><span class="mono" id="countdown">--:--</span></span></div>
       </div>
+    </div>
+    <div class="group hidden" id="grade-group">
+      <div class="group-title">成绩</div>
+      <div class="rows">
+        <div class="row"><span class="row-label">总分</span><span class="row-value"><span class="grade-total" id="grade-total">—</span></span></div>
+      </div>
+      <div id="grade-list"></div>
     </div>
     <div class="group">
       <div class="paper-head">
@@ -515,6 +567,21 @@ function startTimer(){
   timer = setInterval(renderCountdown, 1000);
 }
 
+function renderGrades(){
+  const group = $("grade-group");
+  if (!group) return;
+  const on = !!model && model.answering && model.graded === true;
+  group.classList.toggle("hidden", !on);
+  if (!on) return;
+  $("grade-total").textContent = (model.gradeTotal || 0) + " / " + (model.gradeMax || 0);
+  const list = $("grade-list");
+  list.innerHTML = (model.grades || []).map((item) => {
+    const score = item.score === null ? "未评分" : item.score + " / " + item.max;
+    const comment = item.comment ? '<div class="grade-comment">' + esc(item.comment) + "</div>" : "";
+    return '<div class="grade-item"><div class="grade-head"><span>第 ' + esc(item.number) + ' 题</span><span class="grade-score">' + esc(score) + "</span></div>" + comment + "</div>";
+  }).join("");
+}
+
 function render(){
   const on = !!model && model.answering;
   const inQuestion = on && model.inQuestion === true;
@@ -535,6 +602,7 @@ function render(){
    * 不能等题目出现才开始算 —— 那会让「已进入」的前几秒不计入考试。
    */
   if (on) startTimer();
+  renderGrades();
   const items = (model && model.questions) || [];
   if (!on || items.length === 0) {
     list.innerHTML = "";
@@ -606,6 +674,74 @@ const paperTitleOf = (paper: string, path: string): string => {
     return value;
   }
   return (path.split("/").pop() ?? "").replace(/\.paper$/i, "");
+};
+
+/** 读 frontmatter 里的题分映射（`scores: { "1": 2 }` 的 YAML 子集）。 */
+const parseScores = (frontmatter: string): Map<string, number> => {
+  const scores = new Map<string, number>();
+  let inScores = false;
+  for (const line of frontmatter.split(/\r?\n/)) {
+    if (/^scores:\s*$/.test(line)) {
+      inScores = true;
+      continue;
+    }
+    if (!inScores) continue;
+    if (!/^\s+\S/.test(line)) {
+      inScores = false;
+      continue;
+    }
+    const match = /^\s*"?([^":]+)"?\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*$/.exec(line);
+    if (match !== null) scores.set((match[1] ?? "").trim(), Number(match[2]));
+  }
+  return scores;
+};
+
+/** 读老师写入的成绩（`grades` 下每题 score / comment）。 */
+const parseGrades = (frontmatter: string): Map<string, { score: number | null; comment: string }> => {
+  const grades = new Map<string, { score: number | null; comment: string }>();
+  let inGrades = false;
+  let current = "";
+  for (const line of frontmatter.split(/\r?\n/)) {
+    if (/^grades:\s*$/.test(line)) {
+      inGrades = true;
+      continue;
+    }
+    if (!inGrades) continue;
+    if (!/^\s/.test(line)) {
+      inGrades = false;
+      continue;
+    }
+    const key = /^\s{2}"?([^":]+)"?:\s*$/.exec(line);
+    if (key !== null) {
+      current = (key[1] ?? "").trim();
+      grades.set(current, { score: null, comment: "" });
+      continue;
+    }
+    const field = /^\s{4}(score|comment):\s*(.*)$/.exec(line);
+    if (field === null || current.length === 0) continue;
+    const value = grades.get(current);
+    if (value === undefined) continue;
+    if (field[1] === "score") {
+      const parsed = Number(field[2]);
+      value.score = Number.isFinite(parsed) ? parsed : null;
+    } else {
+      value.comment = unquote(field[2] ?? "");
+    }
+  }
+  return grades;
+};
+
+/** 去掉 YAML 双引号并按需转义还原。 */
+const unquote = (value: string): string => {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      return JSON.parse(trimmed) as string;
+    } catch {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
 };
 
 /**
