@@ -5,14 +5,14 @@
  * 与出题方的考试面板（考试信息 / 参考资料 / 发布考试）分开成两个扩展：
  * 两类角色看到的东西没有交集，混在一起会让彼此的界面互相污染。
  *
- * <p>显示条件：工作区里有 `.sumi/exam-session.json`（进入工具在首次进入时写下）。
- * 出题方的工作区没有这个文件。
+ * <p>显示条件：`.sumi/state.json` 的 `behaviors` 里有 `exam.enter`（进入工具在首次进入时写下）。
+ * 出题方的工作区没有这条记录。
  */
 import * as vscode from "vscode";
 
 const VIEW_ID = "numas.exam.answer.view";
-/** 个人计时状态（进入工具写入，不进 git）。 */
-const SESSION_FILE = ".sumi/exam-session.json";
+/** 工作区状态（进入工具写入，不进 git）。 */
+const STATE_FILE = ".sumi/state.json";
 /** 工作区业务配置：试卷清单与作答时长。 */
 const CONF_FILE = ".sumi/workspace.conf";
 /** 提交工具与它写出的状态文件（工作区自带）。 */
@@ -48,7 +48,7 @@ type ViewModel = {
  * 解析考试工作区根。
  *
  * <p>工程题会把 `vscode.workspace.workspaceFolders` 切到 `project/`，
- * 这时 `.sumi/exam-session.json`、`workspace.conf`、提交工具都不在当前根下，
+ * 这时 `.sumi/state.json`、`workspace.conf`、提交工具都不在当前根下，
  * 直接读会得到「没有会话 → 面板消失 / 返回试卷空转」。
  * 从当前根向上找带会话文件的目录，最多 6 层。
  */
@@ -56,7 +56,7 @@ const resolveExamRoot = async (): Promise<vscode.Uri | undefined> => {
   let current = vscode.workspace.workspaceFolders?.[0]?.uri;
   for (let depth = 0; current !== undefined && depth < 6; depth += 1) {
     try {
-      await vscode.workspace.fs.stat(vscode.Uri.joinPath(current, ...SESSION_FILE.split("/")));
+      await vscode.workspace.fs.stat(vscode.Uri.joinPath(current, ...STATE_FILE.split("/")));
       return current;
     } catch {
       /* 当前层没有会话文件，继续向上。 */
@@ -86,7 +86,6 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
   /** 是否已经主动把左侧切到作答面板；只切一次，之后尊重用户选择。 */
   private switched = false;
   /** 老师身份下是否已经把左栏切回考试面板。 */
-  private teacherViewRestored = false;
   /** 最近一次解析到的试卷 URI：工程题切根 / 页面状态变化后仍能直接打开。 */
   private paperUri: vscode.Uri | undefined;
 
@@ -178,26 +177,6 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
     }
     const model = await this.load();
     this.post({ type: "model", model });
-    /*
-     * 进入工具是在 IDE 起来之后才写 role 的，扩展激活时可能还没写成；
-     * 这里在**确认作答身份之后**再切一次，避免「面板有数据但左侧还停在考试面板」。
-     */
-    if (!model.answering && !this.teacherViewRestored) {
-      const folder = await resolveExamRoot();
-      if (folder !== undefined) {
-        const role = await readRole(folder);
-        const branch = await readBranch(folder);
-        /* 只有明确是老师（或主分支）才切考试面板；会话还没写时不抢学生的视图。 */
-        if (role === "teacher" || branch === "main") {
-          this.teacherViewRestored = true;
-          try {
-            await vscode.commands.executeCommand("workbench.view.extension.numas.exam.panel");
-          } catch {
-            this.teacherViewRestored = false;
-          }
-        }
-      }
-    }
     if (model.answering && !this.switched) {
       this.switched = true;
       try {
@@ -216,23 +195,6 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
     }
     const session = await this.session(folder);
     if (session === undefined) {
-      return EMPTY;
-    }
-    /*
-     * 只有**明确判定为学生**才显示作答面板。
-     * 判据是进入工具写下的 `role`（查 repo 所有权：owner = 老师）。
-     * 老会话没有 role 字段时按老师处理 —— 宁可不出作答面板，
-     * 也不能让出题方看见学生的倒计时与交卷入口。
-     */
-    if (session.role !== "student") {
-      return EMPTY;
-    }
-    /*
-     * 主分支是老师的仓。即使会话被历史/模拟写成了 student，
-     * 也不能在主分支上出作答面板 —— 这是最后一道兜底。
-     */
-    const branch = await this.branch(folder);
-    if (branch.length === 0 || branch === "main") {
       return EMPTY;
     }
     const conf = await this.read(vscode.Uri.joinPath(folder, ...CONF_FILE.split("/")));
@@ -272,8 +234,8 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
 
   private async session(
     folder: vscode.Uri,
-  ): Promise<{ firstEnteredAt: string; deadlineAt: string; role: string } | undefined> {
-    const text = await this.read(vscode.Uri.joinPath(folder, ...SESSION_FILE.split("/")));
+  ): Promise<{ firstEnteredAt: string; deadlineAt: string } | undefined> {
+    const text = await this.read(vscode.Uri.joinPath(folder, ...STATE_FILE.split("/")));
     if (text === undefined) {
       return undefined;
     }
@@ -282,15 +244,24 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       if (typeof data !== "object" || data === null) {
         return undefined;
       }
-      const record = data as Record<string, unknown>;
-      const firstEnteredAt = typeof record["firstEnteredAt"] === "string" ? record["firstEnteredAt"] : "";
+      const behaviors = (data as Record<string, unknown>)["behaviors"];
+      if (!Array.isArray(behaviors)) {
+        return undefined;
+      }
+      const entry = behaviors.find(
+        (item): item is Record<string, unknown> =>
+          typeof item === "object" && item !== null && item["event"] === "exam.enter",
+      );
+      if (entry === undefined) {
+        return undefined;
+      }
+      const firstEnteredAt = typeof entry["timestamp"] === "string" ? entry["timestamp"] : "";
       if (firstEnteredAt.length === 0) {
         return undefined;
       }
       return {
         firstEnteredAt,
-        deadlineAt: typeof record["deadlineAt"] === "string" ? record["deadlineAt"] : "",
-        role: typeof record["role"] === "string" ? record["role"] : "",
+        deadlineAt: typeof entry["content"] === "string" ? entry["content"] : "",
       };
     } catch {
       return undefined;
@@ -687,35 +658,6 @@ const firstLineOf = (text: string): string => {
   return "";
 };
 
-/** 当前分支短名；读不到返回空串。 */
-const readBranch = async (folder: vscode.Uri): Promise<string> => {
-  try {
-    const raw = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(folder, ".git", "HEAD"));
-    const text = new TextDecoder().decode(raw);
-    const ref = /^ref:\s*refs\/heads\/(.+)\s*$/m.exec(text);
-    return ref === null ? "" : (ref[1] ?? "").trim();
-  } catch {
-    return "";
-  }
-};
-
-/** 读进入工具写下的 role；没有会话文件或字段时返回空串。 */
-const readRole = async (folder: vscode.Uri): Promise<string> => {
-  try {
-    const raw = await vscode.workspace.fs.readFile(
-      vscode.Uri.joinPath(folder, ".sumi", "exam-session.json"),
-    );
-    const data: unknown = JSON.parse(new TextDecoder().decode(raw));
-    if (typeof data !== "object" || data === null) {
-      return "";
-    }
-    const role = (data as Record<string, unknown>)["role"];
-    return typeof role === "string" ? role : "";
-  } catch {
-    return "";
-  }
-};
-
 /**
  * 左侧默认视图是出题方的考试面板（模板里静态写的 `sumi.defaultView.left`），
  * 而活动栏默认隐藏、学生没有图标可点 —— 检测到这是作答工作区（有会话文件）时，
@@ -727,17 +669,8 @@ const switchLeftView = async (): Promise<boolean> => {
     return false;
   }
   try {
-    await vscode.workspace.fs.stat(vscode.Uri.joinPath(folder, ".sumi", "exam-session.json"));
+    await vscode.workspace.fs.stat(vscode.Uri.joinPath(folder, ".sumi", "state.json"));
   } catch {
-    return false;
-  }
-  /* 只有学生才切到作答面板：老师那边是本扩展不该抢的位置。 */
-  const role = await readRole(folder);
-  if (role !== "student") {
-    return false;
-  }
-  const branch = await readBranch(folder);
-  if (branch.length === 0 || branch === "main") {
     return false;
   }
   try {
