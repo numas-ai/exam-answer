@@ -13,6 +13,8 @@ import * as vscode from "vscode";
 const VIEW_ID = "numas.exam.answer.view";
 /** 工作区状态（进入工具写入，不进 git）。 */
 const STATE_FILE = ".sumi/state.json";
+/** 工作区角色（webapp 按 repo 生效权限写入，扩展只读）。 */
+const ROLE_FILE = ".sumi/repo-job.json";
 /** 工作区业务配置：试卷清单与作答时长。 */
 const CONF_FILE = ".sumi/workspace.conf";
 /** 提交工具与它写出的状态文件（工作区自带）。 */
@@ -59,6 +61,40 @@ type ViewModel = {
   readonly graded: boolean;
   readonly gradeTotal: number;
   readonly gradeMax: number;
+};
+
+/**
+ * 读工作区角色（`teacher` / `student`）；缺失或损坏返回 undefined。
+ *
+ * <p>角色由 webapp 在进入前按 repo 的生效权限查询后写入 `.sumi/repo-job.json`，
+ * 是「当前这个人」的角色，不是仓里有没有答案推断出来的。工程题会切根，
+ * 所以从当前根逐级向上找。
+ */
+const readWorkspaceRole = async (): Promise<"teacher" | "student" | undefined> => {
+  let current = vscode.workspace.workspaceFolders?.[0]?.uri;
+  for (let depth = 0; current !== undefined && depth < 6; depth += 1) {
+    try {
+      const bytes = await vscode.workspace.fs.readFile(
+        vscode.Uri.joinPath(current, ...ROLE_FILE.split("/")),
+      );
+      const data: unknown = JSON.parse(new TextDecoder("utf-8").decode(bytes));
+      if (typeof data === "object" && data !== null) {
+        const role = (data as Record<string, unknown>)["role"];
+        if (role === "teacher" || role === "student") {
+          return role;
+        }
+      }
+      return undefined;
+    } catch {
+      /* 当前层没有角色文件，继续向上。 */
+    }
+    const parent = vscode.Uri.joinPath(current, "..");
+    if (parent.toString() === current.toString()) {
+      break;
+    }
+    current = parent;
+  }
+  return undefined;
 };
 
 /**
@@ -210,6 +246,10 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
 
   /** 组装面板数据；没有会话文件说明不是作答工作区。 */
   private async load(): Promise<ViewModel> {
+    /* 管理者拿到的是创建态：旧会话文件可能还在，不能据此落回作答面板。 */
+    if ((await readWorkspaceRole()) === "teacher") {
+      return EMPTY;
+    }
     const folder = await resolveExamRoot();
     if (folder === undefined) {
       return EMPTY;
@@ -800,6 +840,15 @@ const firstLineOf = (text: string): string => {
  * 主动把左侧切到本面板。只切一次，之后尊重用户自己的选择。
  */
 const switchLeftView = async (): Promise<boolean> => {
+  /*
+   * 角色优先：管理者即使工作区里残留了旧会话文件，也不能被切到作答面板；
+   * 普通成员才切换。没有角色文件（旧工作区）时保持原来按会话文件判断。
+   */
+  const role = await readWorkspaceRole();
+  if (role === "teacher") {
+    /* 不需要切换就是「已完成」，别让重试循环再跑。 */
+    return true;
+  }
   const folder = await resolveExamRoot();
   if (folder === undefined) {
     return false;
