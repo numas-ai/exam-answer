@@ -197,8 +197,12 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
         });
         return;
       }
+      if (record.type === "openPaper") {
+        void this.backToPaper();
+        return;
+      }
       if (record.type === "reveal" && typeof (message as { number?: unknown }).number === "number") {
-        void vscode.commands.executeCommand("numas.paper.reveal", String((message as { number: number }).number));
+        void this.revealQuestion((message as { number: number }).number);
       }
     });
     this.timer = setInterval(() => void this.refresh(), REFRESH_MS);
@@ -394,7 +398,11 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
        * 一起恢复；再打开试卷，把卷面标签页拉到前台。
        */
       await vscode.commands.executeCommand("numas.paper.exitProject").then(undefined, () => undefined);
-      await vscode.commands.executeCommand("numas.paper.open", uri.toString());
+      /* 两条入口都走：paper.open 负责复用已打开面板，openWith 兜底没有面板时真正拉起编辑器。 */
+      await vscode.commands.executeCommand("numas.paper.open", uri.toString()).catch(() => undefined);
+      await vscode.commands
+        .executeCommand("vscode.openWith", uri, "numas.paper", { preview: false })
+        .catch(() => undefined);
       /* 中间编辑区没标签时 webapp 会收成 0；打开后再显式聚焦，确保卷面可见。 */
       await vscode.commands
         .executeCommand("editor.focusActiveEditorGroup")
@@ -429,13 +437,12 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       await vscode.workspace.fs.delete(stateUri, { useTrash: false }).then(undefined, () => undefined);
 
       const command = `node ${SUBMIT_TOOL_PATH}`;
-      try {
-        await vscode.commands.executeCommand("numas.ui.terminal.run", { text: command, cwd: folder.fsPath });
-      } catch {
-        await vscode.commands.executeCommand("numas.ui.terminal.run", {
-          text: `cd ${JSON.stringify(folder.fsPath)} && ${command}`,
-        });
-      }
+      /* 自动提交是后台任务：创建 PTY 执行，不弹终端 widget。 */
+      await vscode.commands.executeCommand("numas.ui.background.run", {
+        text: command,
+        cwd: folder.fsPath,
+        name: "提交作答",
+      });
 
       const outcome = await this.waitForSubmit(stateUri);
       if (!outcome.ok) {
@@ -519,9 +526,9 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
 .q-card:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .empty{padding:10px;color:var(--faint);font-size:12px;line-height:1.6}
 /* 与 exam-panel 的 foot 同款：4px 上边距、12px 下边距、无 1px 分隔线。 */
-.foot{flex:none;display:flex;flex-direction:column;gap:6px;padding:4px 12px 12px}
-/* 与 exam-panel 的「发布考试」同一套按钮：32px / 9px 圆角 / 实色 accent / 600。 */
-.foot-btn{width:100%;height:32px;border:0;border-radius:9px;background:var(--accent);color:#fff;font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:transform .16s cubic-bezier(.2,.8,.2,1),filter .15s ease}
+.foot{flex:none;display:flex;flex-direction:column;gap:6px;padding:6px 12px 14px}
+/* 与 exam-panel 的「发布考试」同款：42px / 14px 圆角 / 实色 accent / 14px 600。 */
+.foot-btn{width:100%;height:42px;border:0;border-radius:14px;background:var(--accent);color:#fff;font:inherit;font-size:14px;font-weight:600;letter-spacing:.02em;cursor:pointer;transition:transform .16s cubic-bezier(.2,.8,.2,1),filter .15s ease}
 .foot-btn:hover:not(:disabled){filter:brightness(.94)}
 .foot-btn:active:not(:disabled){transform:scale(.95);filter:brightness(.88);transition-duration:.08s}
 .foot-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
@@ -538,6 +545,10 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
 .grade-comment{margin-top:2px;font-size:12px;line-height:1.5;color:#2f2a26;word-break:break-word}
 .grade-total{color:var(--accent);font-size:14px;font-weight:600;font-variant-numeric:tabular-nums}
 .hidden{display:none !important}
+
+/* 全局：不显示滚动条（内容仍可滚动）。 */
+*{scrollbar-width:none!important;-ms-overflow-style:none!important}
+*::-webkit-scrollbar{width:0!important;height:0!important;display:none!important}
 </style></head><body>
 <div class="panel">
   <div class="body">
@@ -701,8 +712,19 @@ vscode.postMessage({ type: "ready" });
 
 /** `workspace.conf` 里第一篇试卷的相对路径。 */
 const paperPathOf = (conf: string): string => {
-  const match = /^\s*content:\s*(?:"([^"]+)"|'([^']+)'|([^\s#]+))\s*$/m.exec(conf);
-  return (match?.[1] ?? match?.[2] ?? match?.[3] ?? "").trim();
+  /*
+   * 文件名可能带空格（`Python 工程题.paper`）。旧正则只取到第一个空白，
+   * 会把路径截成 `Python`，导致试卷读不到、题目列表为空。
+   * 这里取整行，去掉行尾注释与成对引号。
+   */
+  const match = /^\s*content:\s*(.+?)\s*$/m.exec(conf);
+  if (match === null) {
+    return "";
+  }
+  return match[1]
+    .replace(/\s+#.*$/, "")
+    .trim()
+    .replace(/^["']|["']$/g, "");
 };
 
 /** 试卷标题：frontmatter 的 `title`，读不到用文件名。 */
