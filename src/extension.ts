@@ -46,6 +46,8 @@ type GradeItem = {
 type ViewModel = {
   /** 是否处于作答工作区（没有会话文件时为 false）。 */
   readonly answering: boolean;
+  /** 到时是否自动交卷；有管理权限的预览页为 false。 */
+  readonly autoSubmit: boolean;
   /** 个人截止时间（epoch 毫秒）；null = 不限时。 */
   readonly deadlineAtMs: number | null;
   /** 当前分支（提交要 push 到它）。 */
@@ -149,6 +151,7 @@ const resolveExamRoot = async (): Promise<vscode.Uri | undefined> => {
 
 const EMPTY: ViewModel = {
   answering: false,
+  autoSubmit: true,
   deadlineAtMs: null,
   branch: "",
   inQuestion: false,
@@ -328,6 +331,7 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
     const graded = grades.some((item) => item.score !== null || item.comment.length > 0);
     return {
       answering: true,
+      autoSubmit: await this.autoSubmit(folder),
       inQuestion,
       /* 解析不出来按不限时处理，避免卷面出现 NaN:NaN:NaN。 */
       deadlineAtMs:
@@ -343,6 +347,21 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       gradeTotal: grades.reduce((sum, item) => sum + (item.score ?? 0), 0),
       gradeMax: grades.reduce((sum, item) => sum + item.max, 0),
     };
+  }
+
+  /** 到时是否自动交卷：页面写 `.sumi/settings.json` 的 `numas.answer.autoSubmit`。 */
+  private async autoSubmit(folder: vscode.Uri): Promise<boolean> {
+    try {
+      const raw = await this.read(vscode.Uri.joinPath(folder, ".sumi", "settings.json"));
+      if (raw === undefined) return true;
+      const data: unknown = JSON.parse(raw);
+      if (typeof data === "object" && data !== null) {
+        return (data as Record<string, unknown>)["numas.answer.autoSubmit"] !== false;
+      }
+    } catch {
+      /* 读不到按自动交卷。 */
+    }
+    return true;
   }
 
   /** 参考资料：只列文件名，作答页只读。 */
@@ -693,7 +712,7 @@ function renderCountdown(){
   if (left <= 0) {
     el.textContent = "已到时";
     el.classList.add("is-over");
-    if (!autoSubmitted) {
+    if (!autoSubmitted && model.autoSubmit !== false) {
       autoSubmitted = true;
       const btn = $("submit-btn");
       if (btn) btn.disabled = true;
