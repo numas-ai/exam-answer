@@ -567,6 +567,18 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       this.post({ type: "submitProgress", state: "done", message: "已交卷" });
       return;
     }
+    /* 手动交卷先确认；到时自动交卷不再打扰。 */
+    if (!auto) {
+      const choice = await vscode.window.showWarningMessage(
+        "确认交卷？交卷后不能再修改答案。",
+        { modal: true },
+        "确认交卷",
+      );
+      if (choice !== "确认交卷") {
+        this.post({ type: "submitProgress", state: "idle" });
+        return;
+      }
+    }
     this.submitting = true;
     this.post({ type: "submitProgress", state: "running", message: "正在交卷…" });
     try {
@@ -736,6 +748,8 @@ function stopTimer(){ if (timer !== null) { clearInterval(timer); timer = null; 
 function renderCountdown(){
   const el = $("countdown");
   if (!el || !model || !model.answering) return;
+  /* 已交卷：倒计时停止，不再跳到「已到时」。 */
+  if (model.submitted) { el.textContent = "已交卷"; el.classList.remove("is-over"); return; }
   if (model.deadlineAtMs === null) { el.textContent = "不限时"; el.classList.remove("is-over"); return; }
   const left = model.deadlineAtMs - Date.now();
   if (left <= 0) {
@@ -756,7 +770,7 @@ function renderCountdown(){
 
 function startTimer(){
   stopTimer();
-  if (!model || !model.answering) return;
+  if (!model || !model.answering || model.submitted) return;
   renderCountdown();
   timer = setInterval(renderCountdown, 1000);
 }
@@ -799,8 +813,20 @@ function render(){
   /*
    * 倒计时先跑起来：试卷还没解析出来（题目为空）时也要计时，
    * 不能等题目出现才开始算 —— 那会让「已进入」的前几秒不计入考试。
+   * 已交卷则停表，刷新后也不再走「已到时」。
    */
-  if (on) startTimer();
+  if (on && model.submitted) {
+    stopTimer();
+    const countdown = $("countdown");
+    if (countdown) {
+      countdown.textContent = "已交卷";
+      countdown.classList.remove("is-over");
+    }
+  } else if (on) {
+    startTimer();
+  } else {
+    stopTimer();
+  }
   renderGrades();
   const items = (model && model.questions) || [];
   /* 题号网格只在内容变化时重建：4 秒轮询 / 点击题号触发刷新时不再整块闪烁。 */
@@ -842,7 +868,18 @@ function setSubmit(state, message){
     }, 2600);
     return;
   }
-  if (state === "done") { btn.disabled = true; btn.dataset.state = "done"; btn.textContent = message || "已交卷"; return; }
+  if (state === "done") {
+    btn.disabled = true;
+    btn.dataset.state = "done";
+    btn.textContent = message || "已交卷";
+    stopTimer();
+    const countdown = $("countdown");
+    if (countdown) {
+      countdown.textContent = "已交卷";
+      countdown.classList.remove("is-over");
+    }
+    return;
+  }
   btn.disabled = false; btn.dataset.state = ""; btn.textContent = "提交作答";
 }
 
