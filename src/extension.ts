@@ -638,9 +638,7 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
 .q-card:active{background:var(--accent);color:#fff;transform:translateY(0) scale(.92);transition-duration:.08s}
 .q-card:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .q-card.is-answered{background:color-mix(in srgb,#1a7f37 14%,transparent);color:#1a7f37}
-.q-card.is-answered::after{content:"✓";position:absolute;right:4px;top:1px;font-size:9px;font-weight:700;color:#1a7f37;line-height:1}
 .q-card.is-answered:hover{background:#1a7f37;color:#fff}
-.q-card.is-answered:hover::after{color:#fff}
 .empty{padding:10px;color:var(--faint);font-size:12px;line-height:1.6}
 /* 与 exam-panel 的 foot 同款：4px 上边距、12px 下边距、无 1px 分隔线。 */
 .foot{flex:none;display:flex;flex-direction:column;gap:6px;padding:6px 12px 14px}
