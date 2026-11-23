@@ -30,6 +30,7 @@ type QuestionItem = {
   readonly number: number;
   /** 题干首行，用作列表标题。 */
   readonly title: string;
+  readonly answered: boolean;
 };
 
 type GradeItem = {
@@ -632,10 +633,12 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
 .paper-head__open:hover{text-decoration:underline;text-underline-offset:3px}
 /* 题号：48px 方形按钮网格，与 exam-panel 一致。 */
 .q-grid{display:grid;grid-template-columns:repeat(4,48px);justify-content:space-between;gap:8px;padding:0 10px}
-.q-card{width:48px;height:48px;border:0;border-radius:10px;background:var(--accent-soft);color:var(--accent);font:inherit;font-size:14px;font-weight:600;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform .16s cubic-bezier(.2,.8,.2,1),background-color .15s ease,color .15s ease}
+.q-card{position:relative;width:48px;height:48px;border:0;border-radius:10px;background:var(--accent-soft);color:var(--accent);font:inherit;font-size:14px;font-weight:600;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform .16s cubic-bezier(.2,.8,.2,1),background-color .15s ease,color .15s ease}
 .q-card:hover{background:var(--accent);color:#fff;transform:translateY(-1px) scale(1)}
 .q-card:active{background:var(--accent);color:#fff;transform:translateY(0) scale(.92);transition-duration:.08s}
 .q-card:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.q-card.is-answered{background:color-mix(in srgb,var(--accent) 22%,transparent)}
+.q-card.is-answered::after{content:"✓";position:absolute;right:4px;top:1px;font-size:9px;font-weight:700;color:var(--accent);line-height:1}
 .empty{padding:10px;color:var(--faint);font-size:12px;line-height:1.6}
 /* 与 exam-panel 的 foot 同款：4px 上边距、12px 下边距、无 1px 分隔线。 */
 .foot{flex:none;display:flex;flex-direction:column;gap:6px;padding:6px 12px 14px}
@@ -769,7 +772,9 @@ function render(){
   renderGrades();
   const items = (model && model.questions) || [];
   /* 题号网格只在内容变化时重建：4 秒轮询 / 点击题号触发刷新时不再整块闪烁。 */
-  const signature = (on ? "1" : "0") + "|" + items.map((q) => q.number + ":" + q.title).join("||");
+  const signature = (on ? "1" : "0") + "|" + items
+    .map((q) => q.number + ":" + q.title + ":" + (q.answered ? "1" : "0"))
+    .join("||");
   if (!on || items.length === 0) {
     if (gridSignature !== signature) {
       gridSignature = signature;
@@ -782,7 +787,7 @@ function render(){
   if (gridSignature !== signature) {
     gridSignature = signature;
     list.innerHTML = items
-      .map((q) => '<button class="q-card" type="button" data-number="' + q.number + '" title="' + esc(q.title) + '">' + q.number + "</button>")
+      .map((q) => '<button class="q-card' + (q.answered ? " is-answered" : "") + '" type="button" data-number="' + q.number + '" title="' + esc(q.title) + '">' + q.number + "</button>")
       .join("");
   }
   startTimer();
@@ -944,8 +949,15 @@ const parseQuestions = (paper: string): QuestionItem[] => {
     const number = Number(match[2]);
     const before = paper.slice(previousIndex, match.index);
     const title = firstLineOf(stemOf(before));
-    items.push({ number, title: title.length > 0 ? title : `第 ${String(number)} 题` });
-    previousIndex = match.index + match[0].length;
+    const contentStart = match.index + match[0].length;
+    const close = paper.indexOf("\n:::", contentStart);
+    const body = paper.slice(contentStart, close < 0 ? paper.length : close);
+    items.push({
+      number,
+      title: title.length > 0 ? title : `第 ${String(number)} 题`,
+      answered: body.trim().length > 0,
+    });
+    previousIndex = contentStart;
     match = blockRegex.exec(paper);
   }
   return items;
