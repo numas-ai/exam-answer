@@ -49,6 +49,8 @@ type ViewModel = {
   readonly answering: boolean;
   /** 到时是否自动交卷；有管理权限的预览页为 false。 */
   readonly autoSubmit: boolean;
+  /** 已经交卷：按钮锁定为「已交卷」，刷新后也不恢复。 */
+  readonly submitted: boolean;
   /** 个人截止时间（epoch 毫秒）；null = 不限时。 */
   readonly deadlineAtMs: number | null;
   /** 当前分支（提交要 push 到它）。 */
@@ -153,6 +155,7 @@ const resolveExamRoot = async (): Promise<vscode.Uri | undefined> => {
 const EMPTY: ViewModel = {
   answering: false,
   autoSubmit: true,
+  submitted: false,
   deadlineAtMs: null,
   branch: "",
   inQuestion: false,
@@ -333,9 +336,12 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
     const enteredMs = Number.isFinite(Date.parse(session.firstEnteredAt))
       ? Date.parse(session.firstEnteredAt)
       : 0;
+    const autoSubmit = await this.autoSubmit(folder);
     return {
       answering: true,
-      autoSubmit: await this.autoSubmit(folder),
+      autoSubmit,
+      /* 管理权限的预览页不锁交卷，方便老师自己验证流程。 */
+      submitted: autoSubmit && (await this.submitted(folder)),
       inQuestion,
       /* 解析不出来按不限时处理，避免卷面出现 NaN:NaN:NaN。 */
       deadlineAtMs:
@@ -351,6 +357,18 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       gradeTotal: grades.reduce((sum, item) => sum + (item.score ?? 0), 0),
       gradeMax: grades.reduce((sum, item) => sum + item.max, 0),
     };
+  }
+
+  /** 已经交过卷：`repo-submit.mjs` 成功后会写 `.sumi/repo-submit.json`。 */
+  private async submitted(folder: vscode.Uri): Promise<boolean> {
+    try {
+      const raw = await this.read(vscode.Uri.joinPath(folder, ".sumi", "repo-submit.json"));
+      if (raw === undefined) return false;
+      const data: unknown = JSON.parse(raw);
+      return typeof data === "object" && data !== null && (data as Record<string, unknown>)["ok"] === true;
+    } catch {
+      return false;
+    }
   }
 
   /** 到时是否自动交卷：页面写 `.sumi/settings.json` 的 `numas.answer.autoSubmit`。 */
@@ -543,6 +561,11 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
     }
     if (!(await this.exists(vscode.Uri.joinPath(folder, ...SUBMIT_TOOL_PATH.split("/"))))) {
       throw new Error(`工作区里没有提交工具（${SUBMIT_TOOL_PATH}）`);
+    }
+    /* 已交卷：刷新 / 旧按钮都不能再触发第二次提交。 */
+    if (await this.submitted(folder)) {
+      this.post({ type: "submitProgress", state: "done", message: "已交卷" });
+      return;
     }
     this.submitting = true;
     this.post({ type: "submitProgress", state: "running", message: "正在交卷…" });
@@ -763,6 +786,12 @@ function render(){
    * 两个动作不在同一屏出现，避免学生没作答就交卷 / 在题目里找不到回卷入口。
    */
   $("submit-btn").classList.toggle("hidden", !on || inQuestion);
+  if (on && model.submitted) {
+    const btn = $("submit-btn");
+    btn.disabled = true;
+    btn.dataset.state = "done";
+    btn.textContent = "已交卷";
+  }
   const title = $("q-title");
   if (title) title.textContent = (model && model.paperTitle) || "试卷";
   const list = $("q-list");
