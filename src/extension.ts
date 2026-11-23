@@ -53,6 +53,7 @@ type ViewModel = {
   /** 是否在工程题 / 项目视图（URL 带题目段）。 */
   readonly inQuestion: boolean;
   readonly questions: readonly QuestionItem[];
+  readonly refs: readonly string[];
   /** 试卷标题。 */
   readonly paperTitle: string;
   /** 老师写入的成绩；没有 grades 或还没评分时为空数组。 */
@@ -70,6 +71,29 @@ type ViewModel = {
  * 是「当前这个人」的角色，不是仓里有没有答案推断出来的。工程题会切根，
  * 所以从当前根逐级向上找。
  */
+const readPageMode = async (): Promise<string | undefined> => {
+  let current = vscode.workspace.workspaceFolders?.[0]?.uri;
+  for (let depth = 0; current !== undefined && depth < 6; depth += 1) {
+    try {
+      const bytes = await vscode.workspace.fs.readFile(
+        vscode.Uri.joinPath(current, ".sumi", "settings.json"),
+      );
+      const data: unknown = JSON.parse(new TextDecoder("utf-8").decode(bytes));
+      if (typeof data === "object" && data !== null) {
+        const mode = (data as Record<string, unknown>)["numas.page.mode"];
+        return typeof mode === "string" ? mode : undefined;
+      }
+      return undefined;
+    } catch {
+      /* 继续向上。 */
+    }
+    const parent = vscode.Uri.joinPath(current, "..");
+    if (parent.toString() === current.toString()) break;
+    current = parent;
+  }
+  return undefined;
+};
+
 const readWorkspaceRole = async (): Promise<"teacher" | "student" | undefined> => {
   let current = vscode.workspace.workspaceFolders?.[0]?.uri;
   for (let depth = 0; current !== undefined && depth < 6; depth += 1) {
@@ -129,6 +153,7 @@ const EMPTY: ViewModel = {
   branch: "",
   inQuestion: false,
   questions: [],
+  refs: [],
   paperTitle: "",
   grades: [],
   graded: false,
@@ -141,7 +166,6 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
   private timer: NodeJS.Timeout | undefined;
   private submitting = false;
   /** 是否已经主动把左侧切到作答面板；只切一次，之后尊重用户选择。 */
-  private switched = false;
   /** 老师身份下是否已经把左栏切回考试面板。 */
   /** 最近一次解析到的试卷 URI：工程题切根 / 页面状态变化后仍能直接打开。 */
   private paperUri: vscode.Uri | undefined;
@@ -163,7 +187,6 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       clearInterval(this.timer);
       this.timer = undefined;
     }
-    this.switched = false;
     this.view = view;
     view.onDidDispose(() => {
       if (this.view === view) {
@@ -201,6 +224,10 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
         void this.backToPaper();
         return;
       }
+      if (record.type === "openRef" && typeof (message as { name?: unknown }).name === "string") {
+        void this.openRef((message as { name: string }).name);
+        return;
+      }
       if (record.type === "reveal" && typeof (message as { number?: unknown }).number === "number") {
         void this.revealQuestion((message as { number: number }).number);
       }
@@ -232,26 +259,29 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
     void webview.postMessage(message);
   }
 
+  private lastModelJson = "";
+
   private async refresh(): Promise<void> {
     if (this.view === undefined) {
       return;
     }
     const model = await this.load();
-    this.post({ type: "model", model });
-    if (model.answering && !this.switched) {
-      this.switched = true;
-      try {
-        await vscode.commands.executeCommand("workbench.view.extension.numas.exam.answer");
-      } catch {
-        this.switched = false;
-      }
+    /*
+     * 模型没变就不重发：4 秒轮询 / 点题号触发的 activeEditor 变化
+     * 不应该让左侧面板重新渲染（那正是闪烁的来源）。
+     */
+    const json = JSON.stringify(model);
+    if (json === this.lastModelJson) {
+      return;
     }
+    this.lastModelJson = json;
+    this.post({ type: "model", model });
   }
 
   /** 组装面板数据；没有会话文件说明不是作答工作区。 */
   private async load(): Promise<ViewModel> {
-    /* 管理者拿到的是创建态：旧会话文件可能还在，不能据此落回作答面板。 */
-    if ((await readWorkspaceRole()) === "teacher") {
+    /* 只认路由：不是 /answer 就直接不显示作答面板，角色完全不参与。 */
+    if ((await readPageMode()) === "answer" ? false : true) {
       return EMPTY;
     }
     const folder = await resolveExamRoot();
@@ -306,12 +336,28 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
           : Date.parse(session.deadlineAt),
       branch: await this.branch(folder),
       questions: paper === undefined ? [] : parseQuestions(paper),
+      refs: await this.references(folder),
       paperTitle: paper === undefined ? "" : paperTitleOf(paper, paperPath),
       grades,
       graded,
       gradeTotal: grades.reduce((sum, item) => sum + (item.score ?? 0), 0),
       gradeMax: grades.reduce((sum, item) => sum + item.max, 0),
     };
+  }
+
+  /** 参考资料：只列文件名，作答页只读。 */
+  private async references(folder: vscode.Uri): Promise<string[]> {
+    try {
+      const entries = await vscode.workspace.fs.readDirectory(
+        vscode.Uri.joinPath(folder, "references"),
+      );
+      return entries
+        .filter(([, type]) => (type & vscode.FileType.File) !== 0)
+        .map(([name]) => name)
+        .sort((left, right) => left.localeCompare(right));
+    } catch {
+      return [];
+    }
   }
 
   private async session(
@@ -364,12 +410,50 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
    * 打开试卷并锚定到题目：先走 `backToPaper`（退出项目模式 / 聚焦卷面），
    * 再让试卷扩展滚到对应题卡。只发 reveal 不打开的话，卷面在后台时用户看不到。
    */
-  private async revealQuestion(number: number): Promise<void> {
-    await this.backToPaper();
+  /** 打开参考资料（只读）：统一走编辑器，不弹终端。 */
+  private async openRef(name: string): Promise<void> {
+    const folder = await resolveExamRoot();
+    if (folder === undefined || name.trim().length === 0) return;
+    const uri = vscode.Uri.joinPath(folder, "references", name.trim());
     try {
+      await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
+    } catch {
+      /* 文件已被删：面板下一次刷新会消失。 */
+    }
+  }
+
+  private async revealQuestion(number: number): Promise<void> {
+    /*
+     * 只发 reveal：不 exitProject、不切左栏。点题号是纯定位动作，
+     * 任何打开/恢复动作都会让左栏与编辑器整块重建，表现就是一闪一闪。
+     */
+    try {
+      const revealed = await vscode.commands.executeCommand<boolean>(
+        "numas.paper.reveal",
+        String(number),
+      );
+      if (revealed === true) {
+        return;
+      }
+    } catch {
+      /* 试卷扩展未就绪：走下面的兜底。 */
+    }
+    /* 卷面还没就绪时只把它打开，不退出项目、不动左栏。 */
+    const folder = await resolveExamRoot();
+    if (folder === undefined) {
+      return;
+    }
+    const conf = await this.read(vscode.Uri.joinPath(folder, ...CONF_FILE.split("/")));
+    const paperPath = conf === undefined ? "" : paperPathOf(conf);
+    if (paperPath.length === 0) {
+      return;
+    }
+    const uri = vscode.Uri.joinPath(folder, ...paperPath.split("/"));
+    try {
+      await vscode.commands.executeCommand("numas.paper.open", uri.toString());
       await vscode.commands.executeCommand("numas.paper.reveal", String(number));
     } catch {
-      /* 试卷扩展未就绪：打开动作已经完成，用户仍能看到卷面。 */
+      /* 打开失败也不动左栏。 */
     }
   }
 
@@ -398,11 +482,18 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
        * 一起恢复；再打开试卷，把卷面标签页拉到前台。
        */
       await vscode.commands.executeCommand("numas.paper.exitProject").then(undefined, () => undefined);
-      /* 两条入口都走：paper.open 负责复用已打开面板，openWith 兜底没有面板时真正拉起编辑器。 */
-      await vscode.commands.executeCommand("numas.paper.open", uri.toString()).catch(() => undefined);
-      await vscode.commands
-        .executeCommand("vscode.openWith", uri, "numas.paper", { preview: false })
-        .catch(() => undefined);
+      /*
+       * 先走 paper.open 复用已打开面板；只有它明确失败时才 openWith，
+       * 避免同一份试卷被重新拉起、webview 整块重建。
+       */
+      const opened = await vscode.commands
+        .executeCommand<boolean>("numas.paper.open", uri.toString())
+        .then((value) => value === true, () => false);
+      if (!opened) {
+        await vscode.commands
+          .executeCommand("vscode.openWith", uri, "numas.paper", { preview: false })
+          .then(undefined, () => undefined);
+      }
       /* 中间编辑区没标签时 webapp 会收成 0；打开后再显式聚焦，确保卷面可见。 */
       await vscode.commands
         .executeCommand("editor.focusActiveEditorGroup")
@@ -450,7 +541,6 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       }
       const message = outcome.branch.length > 0 ? `已提交到 ${outcome.branch}` : "已提交";
       this.post({ type: "submitProgress", state: "done", message });
-      void vscode.window.showInformationMessage(message);
       await this.refresh();
     } finally {
       this.submitting = false;
@@ -514,6 +604,9 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
 #countdown{font-variant-numeric:tabular-nums;font-size:15px;font-weight:600;color:#2f2a26}
 #countdown.is-over{color:#b42318}
 /* 试卷分组栏：左标题、右「打开」，与 exam-panel 同款。 */
+.tabs{display:flex;gap:4px;margin:10px 10px 0;padding:3px;border-radius:11px;background:color-mix(in srgb,#2f2a26 7%,transparent)}
+.tab{flex:1;height:30px;border:0;border-radius:8px;background:transparent;color:#6b6158;font:inherit;font-size:12px;font-weight:600;cursor:pointer}
+.tab.is-active{background:#fffdf9;color:var(--accent);box-shadow:0 1px 3px rgba(90,55,20,.12)}
 .paper-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 10px;margin:0 0 6px}
 .paper-head__title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--accent);font-size:13px;font-weight:600}
 .paper-head__open{flex:none;padding:2px 0;border:0;background:none;color:var(--accent);font:inherit;font-size:12px;font-weight:600;cursor:pointer}
@@ -528,7 +621,7 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
 /* 与 exam-panel 的 foot 同款：4px 上边距、12px 下边距、无 1px 分隔线。 */
 .foot{flex:none;display:flex;flex-direction:column;gap:6px;padding:6px 12px 14px}
 /* 与 exam-panel 的「发布考试」同款：42px / 14px 圆角 / 实色 accent / 14px 600。 */
-.foot-btn{width:100%;height:42px;border:0;border-radius:14px;background:var(--accent);color:#fff;font:inherit;font-size:14px;font-weight:600;letter-spacing:.02em;cursor:pointer;transition:transform .16s cubic-bezier(.2,.8,.2,1),filter .15s ease}
+.foot-btn{width:100%;height:36px;border:0;border-radius:10px;background:var(--accent);color:#fff;font:inherit;font-size:13px;font-weight:400;letter-spacing:.02em;cursor:pointer;transition:transform .16s cubic-bezier(.2,.8,.2,1),filter .15s ease}
 .foot-btn:hover:not(:disabled){filter:brightness(.94)}
 .foot-btn:active:not(:disabled){transform:scale(.95);filter:brightness(.88);transition-duration:.08s}
 .foot-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
@@ -552,36 +645,38 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
 </style></head><body>
 <div class="panel">
   <div class="body">
-    <div class="group" id="time-group">
-      <div class="group-title">剩余时间</div>
-      <div class="rows">
-        <div class="row"><span class="row-value"><span class="mono" id="countdown">--:--</span></span></div>
+    <section id="pane-paper">
+      <div class="group" id="time-group">
+        <div class="group-title">剩余时间</div>
+        <div class="rows">
+          <div class="row"><span class="row-value"><span class="mono" id="countdown">--:--</span></span></div>
+        </div>
       </div>
-    </div>
-    <div class="group hidden" id="grade-group">
-      <div class="group-title">成绩</div>
-      <div class="rows">
-        <div class="row"><span class="row-label">总分</span><span class="row-value"><span class="grade-total" id="grade-total">—</span></span></div>
+      <div class="group hidden" id="grade-group">
+        <div class="group-title">成绩</div>
+        <div class="rows">
+          <div class="row"><span class="row-label">总分</span><span class="row-value"><span class="grade-total" id="grade-total">—</span></span></div>
+        </div>
+        <div id="grade-list"></div>
       </div>
-      <div id="grade-list"></div>
-    </div>
-    <div class="group">
-      <div class="paper-head">
-        <span class="paper-head__title" id="q-title">题目</span>
-        <button class="paper-head__open" id="open-paper" type="button">打开</button>
+      <div class="group">
+        <div class="paper-head">
+          <span class="paper-head__title" id="q-title">试卷</span>
+          <button class="paper-head__open" id="open-paper" type="button">查看</button>
+        </div>
+        <div class="q-grid" id="q-list"></div>
+        <div class="empty hidden" id="q-empty">还没有题目</div>
       </div>
-      <div class="q-grid" id="q-list"></div>
-      <div class="empty hidden" id="q-empty">还没有题目</div>
-    </div>
+    </section>
   </div>
   <div class="foot hidden" id="foot">
     <button class="foot-btn" id="submit-btn" type="button">提交作答</button>
-    <p class="submit-status" id="submit-status" hidden></p>
   </div>
 </div>
 <script nonce="${nonce}">
 const vscode = acquireVsCodeApi();
 let model = null;
+let gridSignature = "";
 let timer = null;
 let autoSubmitted = false;
 const $ = (id) => document.getElementById(id);
@@ -643,11 +738,10 @@ function render(){
    * 两个动作不在同一屏出现，避免学生没作答就交卷 / 在题目里找不到回卷入口。
    */
   $("submit-btn").classList.toggle("hidden", !on || inQuestion);
-  $("submit-status").classList.toggle("hidden", inQuestion || $("submit-status").dataset.hidden === "1");
+  const title = $("q-title");
+  if (title) title.textContent = (model && model.paperTitle) || "试卷";
   const list = $("q-list");
   const empty = $("q-empty");
-  const title = $("q-title");
-  if (on && model.paperTitle) title.textContent = model.paperTitle;
   /*
    * 倒计时先跑起来：试卷还没解析出来（题目为空）时也要计时，
    * 不能等题目出现才开始算 —— 那会让「已进入」的前几秒不计入考试。
@@ -655,25 +749,34 @@ function render(){
   if (on) startTimer();
   renderGrades();
   const items = (model && model.questions) || [];
+  /* 题号网格只在内容变化时重建：4 秒轮询 / 点击题号触发刷新时不再整块闪烁。 */
+  const signature = (on ? "1" : "0") + "|" + items.map((q) => q.number + ":" + q.title).join("||");
   if (!on || items.length === 0) {
-    list.innerHTML = "";
+    if (gridSignature !== signature) {
+      gridSignature = signature;
+      list.innerHTML = "";
+    }
     empty.classList.toggle("hidden", !on);
     return;
   }
   empty.classList.add("hidden");
-  list.innerHTML = items
-    .map((q) => '<button class="q-card" type="button" data-number="' + q.number + '" title="' + esc(q.title) + '">' + q.number + "</button>")
-    .join("");
+  if (gridSignature !== signature) {
+    gridSignature = signature;
+    list.innerHTML = items
+      .map((q) => '<button class="q-card" type="button" data-number="' + q.number + '" title="' + esc(q.title) + '">' + q.number + "</button>")
+      .join("");
+  }
   startTimer();
 }
 
 function setSubmit(state, message){
-  const status = $("submit-status"), btn = $("submit-btn");
-  if (!status || !btn) return;
-  if (state === "running") { btn.disabled = true; status.dataset.hidden = "0"; status.hidden = false; status.className = "submit-status is-running"; status.textContent = message || "正在提交作答…"; return; }
-  if (state === "failed") { btn.disabled = false; status.dataset.hidden = "0"; status.hidden = false; status.className = "submit-status is-error"; status.textContent = message || "提交失败"; return; }
-  if (state === "done") { btn.disabled = true; status.dataset.hidden = "0"; status.hidden = false; status.className = "submit-status"; status.textContent = message || "已提交"; return; }
-  status.dataset.hidden = "1"; status.hidden = true; status.className = "submit-status"; status.textContent = "";
+  /* 提交状态只在按钮内变化：不另起状态行。 */
+  const btn = $("submit-btn");
+  if (!btn) return;
+  if (state === "running") { btn.disabled = true; btn.dataset.state = "running"; btn.textContent = "正在提交…"; return; }
+  if (state === "failed") { btn.disabled = false; btn.dataset.state = "failed"; btn.textContent = "提交失败，重试"; return; }
+  if (state === "done") { btn.disabled = true; btn.dataset.state = "done"; btn.textContent = message || "已提交"; return; }
+  btn.disabled = false; btn.dataset.state = ""; btn.textContent = "提交作答";
 }
 
 window.addEventListener("message", (event) => {
@@ -689,6 +792,8 @@ window.addEventListener("message", (event) => {
   }
   if (data.type === "submitProgress") setSubmit(data.state, data.message);
 });
+
+$("open-paper").onclick = () => vscode.postMessage({ type: "openPaper" });
 
 document.addEventListener("click", (event) => {
   const target = event.target;
@@ -721,7 +826,7 @@ const paperPathOf = (conf: string): string => {
   if (match === null) {
     return "";
   }
-  return match[1]
+  return (match[1] ?? "")
     .replace(/\s+#.*$/, "")
     .trim()
     .replace(/^["']|["']$/g, "");
@@ -856,53 +961,6 @@ const firstLineOf = (text: string): string => {
   return "";
 };
 
-/**
- * 左侧默认视图是出题方的考试面板（模板里静态写的 `sumi.defaultView.left`），
- * 而活动栏默认隐藏、学生没有图标可点 —— 检测到这是作答工作区（有会话文件）时，
- * 主动把左侧切到本面板。只切一次，之后尊重用户自己的选择。
- */
-const switchLeftView = async (): Promise<boolean> => {
-  /*
-   * 角色优先：管理者即使工作区里残留了旧会话文件，也不能被切到作答面板；
-   * 普通成员才切换。没有角色文件（旧工作区）时保持原来按会话文件判断。
-   */
-  const role = await readWorkspaceRole();
-  if (role === "teacher") {
-    /* 不需要切换就是「已完成」，别让重试循环再跑。 */
-    return true;
-  }
-  const folder = await resolveExamRoot();
-  if (folder === undefined) {
-    return false;
-  }
-  try {
-    await vscode.workspace.fs.stat(vscode.Uri.joinPath(folder, ".sumi", "state.json"));
-  } catch {
-    return false;
-  }
-  try {
-    await vscode.commands.executeCommand("workbench.view.extension.numas.exam.answer");
-    return true;
-  } catch {
-    return false;
-  }
-};
-
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(vscode.window.registerWebviewViewProvider(VIEW_ID, new AnswerProvider()));
-  /*
-   * 稍等一拍：工作区与视图容器要先建好，命令才能切过去。
-   * 没切成功就再试一次 —— 前一次可能发生在视图注册之前。
-   */
-  const attempt = (remaining: number): void => {
-    if (remaining <= 0) {
-      return;
-    }
-    void switchLeftView().then((done) => {
-      if (!done) {
-        setTimeout(() => attempt(remaining - 1), 1200);
-      }
-    });
-  };
-  setTimeout(() => attempt(3), 800);
 }
