@@ -217,7 +217,7 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
           this.post({
             type: "submitProgress",
             state: "failed",
-            message: `${record.auto === true ? "自动提交失败" : "提交失败"}：${
+            message: `交卷失败：${
               error instanceof Error ? error.message : String(error)
             }`,
           });
@@ -542,7 +542,7 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       throw new Error(`工作区里没有提交工具（${SUBMIT_TOOL_PATH}）`);
     }
     this.submitting = true;
-    this.post({ type: "submitProgress", state: "running", message: auto ? "正在自动提交…" : "正在提交作答…" });
+    this.post({ type: "submitProgress", state: "running", message: "正在交卷…" });
     try {
       const stateUri = vscode.Uri.joinPath(folder, ...SUBMIT_STATE_PATH.split("/"));
       await vscode.workspace.fs.delete(stateUri, { useTrash: false }).then(undefined, () => undefined);
@@ -552,15 +552,15 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       await vscode.commands.executeCommand("numas.ui.background.run", {
         text: command,
         cwd: folder.fsPath,
-        name: "提交作答",
+        name: "交卷",
       });
 
       const outcome = await this.waitForSubmit(stateUri);
       if (!outcome.ok) {
-        throw new Error(outcome.error.length > 0 ? outcome.error : "提交失败：终端工具没有给出原因");
+        throw new Error(outcome.error.length > 0 ? outcome.error : "交卷失败：没有收到结果，请稍后重试");
       }
-      const message = outcome.branch.length > 0 ? `已提交到 ${outcome.branch}` : "已提交";
-      this.post({ type: "submitProgress", state: "done", message });
+      /* 对用户只说「已交卷」：分支、提交等实现细节不进产品文案。 */
+      this.post({ type: "submitProgress", state: "done", message: "已交卷" });
       await this.refresh();
     } finally {
       this.submitting = false;
@@ -797,9 +797,9 @@ function setSubmit(state, message){
   /* 提交状态只在按钮内变化：不另起状态行。 */
   const btn = $("submit-btn");
   if (!btn) return;
-  if (state === "running") { btn.disabled = true; btn.dataset.state = "running"; btn.textContent = "正在提交…"; return; }
-  if (state === "failed") { btn.disabled = false; btn.dataset.state = "failed"; btn.textContent = "提交失败，重试"; return; }
-  if (state === "done") { btn.disabled = true; btn.dataset.state = "done"; btn.textContent = message || "已提交"; return; }
+  if (state === "running") { btn.disabled = true; btn.dataset.state = "running"; btn.textContent = "正在交卷…"; return; }
+  if (state === "failed") { btn.disabled = false; btn.dataset.state = "failed"; btn.textContent = "交卷失败，重试"; return; }
+  if (state === "done") { btn.disabled = true; btn.dataset.state = "done"; btn.textContent = message || "已交卷"; return; }
   btn.disabled = false; btn.dataset.state = ""; btn.textContent = "提交作答";
 }
 
