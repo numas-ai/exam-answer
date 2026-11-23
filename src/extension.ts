@@ -50,6 +50,10 @@ type ViewModel = {
   readonly refs: readonly string[];
   /** 试卷标题。 */
   readonly paperTitle: string;
+  /** 全卷已给分：左栏用成绩替代剩余时间。 */
+  readonly graded: boolean;
+  readonly gradeTotal: number;
+  readonly gradeMax: number;
 };
 
 /**
@@ -145,6 +149,9 @@ const EMPTY: ViewModel = {
   questions: [],
   refs: [],
   paperTitle: "",
+  graded: false,
+  gradeTotal: 0,
+  gradeMax: 0,
 };
 
 export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -299,6 +306,14 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       active.toString() !== folder.toString() &&
       active.fsPath.startsWith(`${folder.fsPath}/`) &&
       !/\.paper$/i.test(active.fsPath);
+    const frontmatter = paper === undefined ? "" : (/^---[\s\S]*?\n---/.exec(paper)?.[0] ?? "");
+    const scores = parseScores(frontmatter);
+    const gradeScores = parseGradeScores(frontmatter);
+    const numbers = [...scores.keys()];
+    const graded = numbers.length > 0
+      && numbers.every((number) => gradeScores.get(number) !== undefined && gradeScores.get(number) !== null);
+    const gradeTotal = numbers.reduce((sum, number) => sum + (gradeScores.get(number) ?? 0), 0);
+    const gradeMax = numbers.reduce((sum, number) => sum + (scores.get(number) ?? 0), 0);
     const enteredMs = Number.isFinite(Date.parse(session.firstEnteredAt))
       ? Date.parse(session.firstEnteredAt)
       : 0;
@@ -318,6 +333,9 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       questions: paper === undefined ? [] : await parseQuestions(paper, folder, enteredMs),
       refs: await this.references(folder),
       paperTitle: paper === undefined ? "" : paperTitleOf(paper, paperPath),
+      graded,
+      gradeTotal,
+      gradeMax,
     };
   }
 
@@ -623,6 +641,7 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
 #countdown{font-variant-numeric:tabular-nums;font-size:15px;font-weight:600;color:#2f2a26}
 #countdown.is-over{color:#b42318}
+.grade-total{color:var(--accent);font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
 /* 试卷分组栏：左标题、右「打开」，与 exam-panel 同款。 */
 .tabs{display:flex;gap:4px;margin:10px 10px 0;padding:3px;border-radius:11px;background:color-mix(in srgb,#2f2a26 7%,transparent)}
 .tab{flex:1;height:30px;border:0;border-radius:8px;background:transparent;color:#6b6158;font:inherit;font-size:12px;font-weight:600;cursor:pointer}
@@ -667,6 +686,12 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
           <div class="row"><span class="row-value"><span class="mono" id="countdown">--:--</span></span></div>
         </div>
       </div>
+      <div class="group hidden" id="grade-summary">
+        <div class="group-title">成绩</div>
+        <div class="rows">
+          <div class="row"><span class="row-value"><span class="grade-total" id="grade-total">—</span></span></div>
+        </div>
+      </div>
       <div class="group">
         <div class="paper-head">
           <span class="paper-head__title" id="q-title">试卷</span>
@@ -696,6 +721,8 @@ function stopTimer(){ if (timer !== null) { clearInterval(timer); timer = null; 
 function renderCountdown(){
   const el = $("countdown");
   if (!el || !model || !model.answering) return;
+  /* 阅卷完成：左栏显示成绩，不再显示剩余时间。 */
+  if (model.graded) { el.textContent = ""; el.classList.remove("is-over"); return; }
   /* 已交卷：倒计时停止，不再跳到「已到时」。 */
   if (model.submitted) { el.textContent = "已交卷"; el.classList.remove("is-over"); return; }
   if (model.deadlineAtMs === null) { el.textContent = "不限时"; el.classList.remove("is-over"); return; }
@@ -718,7 +745,7 @@ function renderCountdown(){
 
 function startTimer(){
   stopTimer();
-  if (!model || !model.answering || model.submitted) return;
+  if (!model || !model.answering || model.submitted || model.graded) return;
   renderCountdown();
   timer = setInterval(renderCountdown, 1000);
 }
@@ -727,7 +754,12 @@ function render(){
   const on = !!model && model.answering;
   const inQuestion = on && model.inQuestion === true;
   $("foot").classList.toggle("hidden", !on);
-  $("time-group").classList.toggle("hidden", !on);
+  const graded = on && model.graded === true;
+  $("time-group").classList.toggle("hidden", !on || graded);
+  $("grade-summary").classList.toggle("hidden", !on || !graded);
+  if (graded) {
+    $("grade-total").textContent = (model.gradeTotal || 0) + " / " + (model.gradeMax || 0);
+  }
   /*
    * 卷面（URL 不带题目）只给「提交作答」；进入题目（URL 带题目段）只给「返回试卷」。
    * 两个动作不在同一屏出现，避免学生没作答就交卷 / 在题目里找不到回卷入口。
@@ -748,17 +780,17 @@ function render(){
    * 不能等题目出现才开始算 —— 那会让「已进入」的前几秒不计入考试。
    * 已交卷则停表，刷新后也不再走「已到时」。
    */
-  if (on && model.submitted) {
+  if (!on || graded) {
+    stopTimer();
+  } else if (model.submitted) {
     stopTimer();
     const countdown = $("countdown");
     if (countdown) {
       countdown.textContent = "已交卷";
       countdown.classList.remove("is-over");
     }
-  } else if (on) {
-    startTimer();
   } else {
-    stopTimer();
+    startTimer();
   }
   const items = (model && model.questions) || [];
   /* 题号网格只在内容变化时重建：4 秒轮询 / 点击题号触发刷新时不再整块闪烁。 */
@@ -877,6 +909,55 @@ const paperTitleOf = (paper: string, path: string): string => {
     return value;
   }
   return (path.split("/").pop() ?? "").replace(/\.paper$/i, "");
+};
+
+/** frontmatter 的题分映射（`scores: { "1": 6 }` 的 YAML 子集）。 */
+const parseScores = (frontmatter: string): Map<string, number> => {
+  const scores = new Map<string, number>();
+  let inScores = false;
+  for (const line of frontmatter.split(/\r?\n/)) {
+    if (/^scores:\s*$/.test(line)) {
+      inScores = true;
+      continue;
+    }
+    if (!inScores) continue;
+    if (!/^\s+\S/.test(line)) {
+      inScores = false;
+      continue;
+    }
+    const match = /^\s*"?([^":]+)"?\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*$/.exec(line);
+    if (match !== null) scores.set((match[1] ?? "").trim(), Number(match[2]));
+  }
+  return scores;
+};
+
+/** 只读 `grades` 下的 score；用于判断全卷是否已阅完并算总分。 */
+const parseGradeScores = (frontmatter: string): Map<string, number | null> => {
+  const grades = new Map<string, number | null>();
+  let inGrades = false;
+  let current = "";
+  for (const line of frontmatter.split(/\r?\n/)) {
+    if (/^grades:\s*$/.test(line)) {
+      inGrades = true;
+      continue;
+    }
+    if (!inGrades) continue;
+    if (!/^\s/.test(line)) {
+      inGrades = false;
+      continue;
+    }
+    const key = /^\s{2}"?([^":]+)"?:\s*$/.exec(line);
+    if (key !== null) {
+      current = (key[1] ?? "").trim();
+      grades.set(current, null);
+      continue;
+    }
+    const field = /^\s{4}score:\s*(.*)$/.exec(line);
+    if (field === null || current.length === 0) continue;
+    const parsed = Number(field[1]);
+    grades.set(current, Number.isFinite(parsed) ? parsed : null);
+  }
+  return grades;
 };
 
 /** 只取当前题号的题干，避免把上一题答案里的链接算进来。 */
