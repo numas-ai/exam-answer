@@ -793,12 +793,23 @@ function render(){
   startTimer();
 }
 
+let submitResetTimer = null;
 function setSubmit(state, message){
-  /* 提交状态只在按钮内变化：不另起状态行。 */
+  /* 提交状态只在按钮内变化：不另起状态行；失败态短暂停留后复原。 */
   const btn = $("submit-btn");
   if (!btn) return;
+  if (submitResetTimer !== null) { clearTimeout(submitResetTimer); submitResetTimer = null; }
   if (state === "running") { btn.disabled = true; btn.dataset.state = "running"; btn.textContent = "正在交卷…"; return; }
-  if (state === "failed") { btn.disabled = false; btn.dataset.state = "failed"; btn.textContent = "交卷失败，重试"; return; }
+  if (state === "failed") {
+    btn.disabled = false;
+    btn.dataset.state = "failed";
+    btn.textContent = "交卷失败，重试";
+    submitResetTimer = setTimeout(() => {
+      submitResetTimer = null;
+      if (!btn.disabled) { btn.dataset.state = ""; btn.textContent = "提交作答"; }
+    }, 2600);
+    return;
+  }
   if (state === "done") { btn.disabled = true; btn.dataset.state = "done"; btn.textContent = message || "已交卷"; return; }
   btn.disabled = false; btn.dataset.state = ""; btn.textContent = "提交作答";
 }
