@@ -887,7 +887,7 @@ const parseScores = (frontmatter: string): Map<string, number> => {
   return scores;
 };
 
-/** 读老师写入的成绩（`grades` 下每题 score / comment）。 */
+/** 读老师写入的成绩（`grades` 下每题 score / comments，唯一格式）。 */
 const parseGrades = (frontmatter: string): Map<string, { score: number | null; comment: string }> => {
   const grades = new Map<string, { score: number | null; comment: string }>();
   let inGrades = false;
@@ -908,7 +908,7 @@ const parseGrades = (frontmatter: string): Map<string, { score: number | null; c
       grades.set(current, { score: null, comment: "" });
       continue;
     }
-    const field = /^\s{4}(score|comment):\s*(.*)$/.exec(line);
+    const field = /^\s{4}(score|comments):\s*(.*)$/.exec(line);
     if (field === null || current.length === 0) continue;
     const value = grades.get(current);
     if (value === undefined) continue;
