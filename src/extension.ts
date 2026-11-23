@@ -330,6 +330,9 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       max: scores.get(number) ?? 0,
     }));
     const graded = grades.some((item) => item.score !== null || item.comment.length > 0);
+    const enteredMs = Number.isFinite(Date.parse(session.firstEnteredAt))
+      ? Date.parse(session.firstEnteredAt)
+      : 0;
     return {
       answering: true,
       autoSubmit: await this.autoSubmit(folder),
@@ -340,7 +343,7 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
           ? null
           : Date.parse(session.deadlineAt),
       branch: await this.branch(folder),
-      questions: paper === undefined ? [] : parseQuestions(paper),
+      questions: paper === undefined ? [] : await parseQuestions(paper, folder, enteredMs),
       refs: await this.references(folder),
       paperTitle: paper === undefined ? "" : paperTitleOf(paper, paperPath),
       grades,
@@ -946,12 +949,80 @@ const unquote = (value: string): string => {
   return trimmed;
 };
 
+/** 只取当前题号的题干，避免把上一题答案里的链接算进来。 */
+const stemForNumber = (text: string, number: number): string => {
+  const line = new RegExp(`^\\s*${String(number)}[.)]\\s+`, "gm");
+  let start = -1;
+  let match: RegExpExecArray | null = line.exec(text);
+  while (match !== null) {
+    start = match.index;
+    match = line.exec(text);
+  }
+  return start >= 0 ? text.slice(start) : text;
+};
+
+/** 工程题里链接到的工程目录；只取形如 `project1/` 的相对路径。 */
+const projectPaths = (stem: string): string[] => {
+  const paths: string[] = [];
+  const linkRegex = /^\s*[-*+]\s*\[[^\]]*\]\(([^)]+)\)\s*$/gm;
+  let match: RegExpExecArray | null = linkRegex.exec(stem);
+  while (match !== null) {
+    const raw = (match[1] ?? "").trim().replace(/^<|>$/g, "");
+    if (raw.length > 0 && !/^[a-z]+:/i.test(raw) && !raw.startsWith("/") && !raw.includes("..")) {
+      paths.push(raw.replace(/\/+$/, ""));
+    }
+    match = linkRegex.exec(stem);
+  }
+  return paths;
+};
+
+/** 工程目录里有没有学生在进入考试之后改过的文件。 */
+const projectChanged = async (
+  root: vscode.Uri,
+  relative: string,
+  sinceMs: number,
+): Promise<boolean> => {
+  const skip = new Set([
+    ".git", "node_modules", ".sumi", ".opencode", "logs", ".tmp",
+    "target", "build", "dist", "out", ".gradle", ".mvn", ".idea", ".vscode",
+  ]);
+  const stack: vscode.Uri[] = [vscode.Uri.joinPath(root, ...relative.split("/"))];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    if (dir === undefined) continue;
+    let entries: [string, vscode.FileType][];
+    try {
+      entries = await vscode.workspace.fs.readDirectory(dir);
+    } catch {
+      continue;
+    }
+    for (const [name, type] of entries) {
+      if ((type & vscode.FileType.Directory) !== 0) {
+        if (!skip.has(name)) stack.push(vscode.Uri.joinPath(dir, name));
+        continue;
+      }
+      try {
+        const stat = await vscode.workspace.fs.stat(vscode.Uri.joinPath(dir, name));
+        if (stat.mtime > sinceMs) return true;
+      } catch {
+        /* 单个文件读不到不影响整体判断。 */
+      }
+    }
+  }
+  return false;
+};
+
 /**
  * 题目列表：按卷面顺序取每个 `:::type#N` 块的题号与题干首行。
  *
- * <p>只做「能列出题号与标题」这件事，完整解析归试卷扩展。
+ * <p>工程题的作答在工程目录里，不在答案块；按进入考试后工程文件的修改时间判断。
+ * 完整解析归试卷扩展。
  */
-const parseQuestions = (paper: string): QuestionItem[] => {
+const parseQuestions = async (
+  paper: string,
+  folder: vscode.Uri,
+  sinceMs: number,
+): Promise<QuestionItem[]> => {
   const items: QuestionItem[] = [];
   const blockRegex = /^:::([a-z-]+)#(\d+)\s*$/gm;
   let previousIndex = 0;
@@ -963,10 +1034,19 @@ const parseQuestions = (paper: string): QuestionItem[] => {
     const contentStart = match.index + match[0].length;
     const close = paper.indexOf("\n:::", contentStart);
     const body = paper.slice(contentStart, close < 0 ? paper.length : close);
+    let answered = body.trim().length > 0;
+    if (!answered && match[1] === "engineering" && sinceMs > 0) {
+      for (const project of projectPaths(stemForNumber(stemOf(before), number))) {
+        if (await projectChanged(folder, project, sinceMs)) {
+          answered = true;
+          break;
+        }
+      }
+    }
     items.push({
       number,
       title: title.length > 0 ? title : `第 ${String(number)} 题`,
-      answered: body.trim().length > 0,
+      answered,
     });
     previousIndex = contentStart;
     match = blockRegex.exec(paper);
