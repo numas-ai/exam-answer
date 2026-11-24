@@ -31,6 +31,10 @@ type QuestionItem = {
   /** 题干首行，用作列表标题。 */
   readonly title: string;
   readonly answered: boolean;
+  /** 本题得分；null = 未评。 */
+  readonly earned: number | null;
+  /** 本题满分。 */
+  readonly max: number;
 };
 
 type ViewModel = {
@@ -318,6 +322,11 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       ? Date.parse(session.firstEnteredAt)
       : 0;
     const autoSubmit = await this.autoSubmit(folder);
+    const questions = (paper === undefined ? [] : await parseQuestions(paper, folder, enteredMs)).map((question) => ({
+      ...question,
+      earned: gradeScores.get(String(question.number)) ?? null,
+      max: scores.get(String(question.number)) ?? 0,
+    }));
     return {
       answering: true,
       autoSubmit,
@@ -330,7 +339,7 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
           ? null
           : Date.parse(session.deadlineAt),
       branch: await this.branch(folder),
-      questions: paper === undefined ? [] : await parseQuestions(paper, folder, enteredMs),
+      questions,
       refs: await this.references(folder),
       paperTitle: paper === undefined ? "" : paperTitleOf(paper, paperPath),
       graded,
@@ -641,7 +650,7 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
 #countdown{font-variant-numeric:tabular-nums;font-size:15px;font-weight:600;color:#2f2a26}
 #countdown.is-over{color:#b42318}
-.grade-total{color:var(--accent);font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
+.grade-total{color:var(--accent);font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
 /* 试卷分组栏：左标题、右「打开」，与 exam-panel 同款。 */
 .tabs{display:flex;gap:4px;margin:10px 10px 0;padding:3px;border-radius:11px;background:color-mix(in srgb,#2f2a26 7%,transparent)}
 .tab{flex:1;height:30px;border:0;border-radius:8px;background:transparent;color:#6b6158;font:inherit;font-size:12px;font-weight:600;cursor:pointer}
@@ -652,7 +661,8 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
 .paper-head__open:hover{text-decoration:underline;text-underline-offset:3px}
 /* 题号：48px 方形按钮网格，与 exam-panel 一致。 */
 .q-grid{display:grid;grid-template-columns:repeat(4,48px);justify-content:space-between;gap:8px;padding:0 10px}
-.q-card{position:relative;width:48px;height:48px;border:0;border-radius:10px;background:var(--accent-soft);color:var(--accent);font:inherit;font-size:14px;font-weight:600;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform .16s cubic-bezier(.2,.8,.2,1),background-color .15s ease,color .15s ease}
+.q-card{position:relative;width:48px;height:56px;border:0;border-radius:10px;background:var(--accent-soft);color:var(--accent);font:inherit;font-size:14px;font-weight:600;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;cursor:pointer;transition:transform .16s cubic-bezier(.2,.8,.2,1),background-color .15s ease,color .15s ease}
+.q-card__score{font-size:10px;font-weight:600;line-height:1.1;opacity:.9;font-variant-numeric:tabular-nums}
 .q-card:hover{background:var(--accent);color:#fff;transform:translateY(-1px) scale(1)}
 .q-card:active{background:var(--accent);color:#fff;transform:translateY(0) scale(.92);transition-duration:.08s}
 .q-card:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
@@ -689,7 +699,7 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
       <div class="group hidden" id="grade-summary">
         <div class="group-title">成绩</div>
         <div class="rows">
-          <div class="row"><span class="row-value"><span class="grade-total" id="grade-total">—</span></span></div>
+          <div class="row"><span class="row-label">总分</span><span class="row-value"><span class="grade-total" id="grade-total">—</span></span></div>
         </div>
       </div>
       <div class="group">
@@ -794,8 +804,8 @@ function render(){
   }
   const items = (model && model.questions) || [];
   /* 题号网格只在内容变化时重建：4 秒轮询 / 点击题号触发刷新时不再整块闪烁。 */
-  const signature = (on ? "1" : "0") + "|" + items
-    .map((q) => q.number + ":" + q.title + ":" + (q.answered ? "1" : "0"))
+  const signature = (on ? "1" : "0") + "|" + (graded ? "1" : "0") + "|" + items
+    .map((q) => q.number + ":" + q.title + ":" + (q.answered ? "1" : "0") + ":" + String(q.earned) + ":" + String(q.max))
     .join("||");
   if (!on || items.length === 0) {
     if (gridSignature !== signature) {
@@ -809,7 +819,12 @@ function render(){
   if (gridSignature !== signature) {
     gridSignature = signature;
     list.innerHTML = items
-      .map((q) => '<button class="q-card' + (q.answered ? " is-answered" : "") + '" type="button" data-number="' + q.number + '" title="' + esc(q.title) + '">' + q.number + "</button>")
+      .map((q) => {
+        const score = graded && q.earned !== null
+          ? '<span class="q-card__score">' + esc(String(q.earned)) + '/' + esc(String(q.max)) + "</span>"
+          : "";
+        return '<button class="q-card' + (q.answered ? " is-answered" : "") + '" type="button" data-number="' + q.number + '" title="' + esc(q.title) + '">' + q.number + score + "</button>";
+      })
       .join("");
   }
   startTimer();
@@ -1058,6 +1073,8 @@ const parseQuestions = async (
       number,
       title: title.length > 0 ? title : `第 ${String(number)} 题`,
       answered,
+      earned: null,
+      max: 0,
     });
     previousIndex = contentStart;
     match = blockRegex.exec(paper);
