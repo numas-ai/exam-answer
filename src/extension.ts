@@ -661,13 +661,13 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
 .paper-head__open:hover{text-decoration:underline;text-underline-offset:3px}
 /* 题号：48px 方形按钮网格，与 exam-panel 一致。 */
 .q-grid{display:grid;grid-template-columns:repeat(4,48px);justify-content:space-between;gap:8px;padding:0 10px}
-.q-card{position:relative;width:48px;height:56px;border:0;border-radius:10px;background:var(--accent-soft);color:var(--accent);font:inherit;font-size:14px;font-weight:600;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;cursor:pointer;transition:transform .16s cubic-bezier(.2,.8,.2,1),background-color .15s ease,color .15s ease}
-.q-card__score{font-size:10px;font-weight:600;line-height:1.1;opacity:.9;font-variant-numeric:tabular-nums}
+.q-card{position:relative;width:48px;height:48px;border:0;border-radius:10px;background:var(--accent-soft);color:var(--accent);font:inherit;font-size:13px;font-weight:600;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0;cursor:pointer;transition:transform .16s cubic-bezier(.2,.8,.2,1),background-color .15s ease,color .15s ease}
+.q-card__score{font-size:8px;font-weight:600;line-height:1;opacity:.9;font-variant-numeric:tabular-nums}
 .q-card:hover{background:var(--accent);color:#fff;transform:translateY(-1px) scale(1)}
 .q-card:active{background:var(--accent);color:#fff;transform:translateY(0) scale(.92);transition-duration:.08s}
 .q-card:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 /* 已作答不用颜色区分：题号下方给「已答」文字，底色保持一致。 */
-.q-card__answered{font-size:10px;font-weight:600;line-height:1.1;opacity:.85}
+.q-card__answered{font-size:8px;font-weight:600;line-height:1;opacity:.85}
 .empty{padding:10px;color:var(--faint);font-size:12px;line-height:1.6}
 /* 与 exam-panel 的 foot 同款：4px 上边距、12px 下边距、无 1px 分隔线。 */
 .foot{flex:none;display:flex;flex-direction:column;gap:6px;padding:6px 12px 14px}

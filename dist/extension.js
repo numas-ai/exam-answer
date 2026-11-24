@@ -33,13 +33,13 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
 .paper-head__open:hover{text-decoration:underline;text-underline-offset:3px}
 /* \u9898\u53F7\uFF1A48px \u65B9\u5F62\u6309\u94AE\u7F51\u683C\uFF0C\u4E0E exam-panel \u4E00\u81F4\u3002 */
 .q-grid{display:grid;grid-template-columns:repeat(4,48px);justify-content:space-between;gap:8px;padding:0 10px}
-.q-card{position:relative;width:48px;height:56px;border:0;border-radius:10px;background:var(--accent-soft);color:var(--accent);font:inherit;font-size:14px;font-weight:600;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;cursor:pointer;transition:transform .16s cubic-bezier(.2,.8,.2,1),background-color .15s ease,color .15s ease}
-.q-card__score{font-size:10px;font-weight:600;line-height:1.1;opacity:.9;font-variant-numeric:tabular-nums}
+.q-card{position:relative;width:48px;height:48px;border:0;border-radius:10px;background:var(--accent-soft);color:var(--accent);font:inherit;font-size:13px;font-weight:600;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0;cursor:pointer;transition:transform .16s cubic-bezier(.2,.8,.2,1),background-color .15s ease,color .15s ease}
+.q-card__score{font-size:8px;font-weight:600;line-height:1;opacity:.9;font-variant-numeric:tabular-nums}
 .q-card:hover{background:var(--accent);color:#fff;transform:translateY(-1px) scale(1)}
 .q-card:active{background:var(--accent);color:#fff;transform:translateY(0) scale(.92);transition-duration:.08s}
 .q-card:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 /* \u5DF2\u4F5C\u7B54\u4E0D\u7528\u989C\u8272\u533A\u5206\uFF1A\u9898\u53F7\u4E0B\u65B9\u7ED9\u300C\u5DF2\u7B54\u300D\u6587\u5B57\uFF0C\u5E95\u8272\u4FDD\u6301\u4E00\u81F4\u3002 */
-.q-card__answered{font-size:10px;font-weight:600;line-height:1.1;opacity:.85}
+.q-card__answered{font-size:8px;font-weight:600;line-height:1;opacity:.85}
 .empty{padding:10px;color:var(--faint);font-size:12px;line-height:1.6}
 /* \u4E0E exam-panel \u7684 foot \u540C\u6B3E\uFF1A4px \u4E0A\u8FB9\u8DDD\u300112px \u4E0B\u8FB9\u8DDD\u3001\u65E0 1px \u5206\u9694\u7EBF\u3002 */
 .foot{flex:none;display:flex;flex-direction:column;gap:6px;padding:6px 12px 14px}
