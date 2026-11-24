@@ -162,6 +162,8 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
   private view: vscode.WebviewView | undefined;
   private timer: NodeJS.Timeout | undefined;
   private submitting = false;
+  /** 已通知 paper 扩展锁定的答卷；避免每 4 秒重复发命令。 */
+  private lockedPaper: string | undefined;
   /** 是否已经主动把左侧切到作答面板；只切一次，之后尊重用户选择。 */
   /** 老师身份下是否已经把左栏切回考试面板。 */
   /** 最近一次解析到的试卷 URI：工程题切根 / 页面状态变化后仍能直接打开。 */
@@ -322,6 +324,10 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       ? Date.parse(session.firstEnteredAt)
       : 0;
     const autoSubmit = await this.autoSubmit(folder);
+    const submitted = autoSubmit && (await this.submitted(folder));
+    if (submitted && paperPath.length > 0) {
+      await this.lockPaper(folder, paperPath);
+    }
     const questions = (paper === undefined ? [] : await parseQuestions(paper, folder, enteredMs)).map((question) => ({
       ...question,
       earned: gradeScores.get(String(question.number)) ?? null,
@@ -331,7 +337,7 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       answering: true,
       autoSubmit,
       /* 管理权限的预览页不锁交卷，方便老师自己验证流程。 */
-      submitted: autoSubmit && (await this.submitted(folder)),
+      submitted,
       inQuestion,
       /* 解析不出来按不限时处理，避免卷面出现 NaN:NaN:NaN。 */
       deadlineAtMs:
@@ -346,6 +352,18 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       gradeTotal,
       gradeMax,
     };
+  }
+
+  /** 交卷后锁住卷面作答；paper 扩展按文档记住，重新打开也生效。 */
+  private async lockPaper(folder: vscode.Uri, paperPath: string): Promise<void> {
+    const uri = vscode.Uri.joinPath(folder, ...paperPath.split("/")).toString();
+    if (this.lockedPaper === uri) return;
+    try {
+      await vscode.commands.executeCommand("numas.paper.setAnswerEditable", uri, false);
+      this.lockedPaper = uri;
+    } catch {
+      /* paper 扩展未就绪时下次轮询再试。 */
+    }
   }
 
   /** 已经交过卷：`repo-submit.mjs` 成功后会写 `.sumi/repo-submit.json`。 */
