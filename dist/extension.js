@@ -22,7 +22,7 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
 #countdown{font-variant-numeric:tabular-nums;font-size:15px;font-weight:600;color:#2f2a26}
 #countdown.is-over{color:#b42318}
-.grade-total{color:var(--accent);font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
+.grade-total{color:var(--accent);font-size:24px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
 /* \u8BD5\u5377\u5206\u7EC4\u680F\uFF1A\u5DE6\u6807\u9898\u3001\u53F3\u300C\u6253\u5F00\u300D\uFF0C\u4E0E exam-panel \u540C\u6B3E\u3002 */
 .tabs{display:flex;gap:4px;margin:10px 10px 0;padding:3px;border-radius:11px;background:color-mix(in srgb,#2f2a26 7%,transparent)}
 .tab{flex:1;height:30px;border:0;border-radius:8px;background:transparent;color:#6b6158;font:inherit;font-size:12px;font-weight:600;cursor:pointer}
@@ -71,7 +71,7 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
       <div class="group hidden" id="grade-summary">
         <div class="group-title">\u6210\u7EE9</div>
         <div class="rows">
-          <div class="row"><span class="row-label">\u603B\u5206</span><span class="row-value"><span class="grade-total" id="grade-total">\u2014</span></span></div>
+          <div class="row"><span class="row-value"><span class="grade-total" id="grade-total">\u2014</span></span></div>
         </div>
       </div>
       <div class="group">

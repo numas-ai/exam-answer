@@ -650,7 +650,7 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
 #countdown{font-variant-numeric:tabular-nums;font-size:15px;font-weight:600;color:#2f2a26}
 #countdown.is-over{color:#b42318}
-.grade-total{color:var(--accent);font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
+.grade-total{color:var(--accent);font-size:24px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
 /* 试卷分组栏：左标题、右「打开」，与 exam-panel 同款。 */
 .tabs{display:flex;gap:4px;margin:10px 10px 0;padding:3px;border-radius:11px;background:color-mix(in srgb,#2f2a26 7%,transparent)}
 .tab{flex:1;height:30px;border:0;border-radius:8px;background:transparent;color:#6b6158;font:inherit;font-size:12px;font-weight:600;cursor:pointer}
@@ -699,7 +699,7 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
       <div class="group hidden" id="grade-summary">
         <div class="group-title">成绩</div>
         <div class="rows">
-          <div class="row"><span class="row-label">总分</span><span class="row-value"><span class="grade-total" id="grade-total">—</span></span></div>
+          <div class="row"><span class="row-value"><span class="grade-total" id="grade-total">—</span></span></div>
         </div>
       </div>
       <div class="group">
