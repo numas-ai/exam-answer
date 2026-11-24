@@ -666,8 +666,8 @@ body{margin:0;padding:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas
 .q-card:hover{background:var(--accent);color:#fff;transform:translateY(-1px) scale(1)}
 .q-card:active{background:var(--accent);color:#fff;transform:translateY(0) scale(.92);transition-duration:.08s}
 .q-card:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
-.q-card.is-answered{background:color-mix(in srgb,#1a7f37 14%,transparent);color:#1a7f37}
-.q-card.is-answered:hover{background:#1a7f37;color:#fff}
+/* 已作答不用颜色区分：右上角一个小圆点，底色保持与未作答一致。 */
+.q-card.is-answered::after{content:"";position:absolute;top:6px;right:6px;width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.6}
 .empty{padding:10px;color:var(--faint);font-size:12px;line-height:1.6}
 /* 与 exam-panel 的 foot 同款：4px 上边距、12px 下边距、无 1px 分隔线。 */
 .foot{flex:none;display:flex;flex-direction:column;gap:6px;padding:6px 12px 14px}
@@ -823,7 +823,7 @@ function render(){
         const score = graded && q.earned !== null
           ? '<span class="q-card__score">' + esc(String(q.earned)) + '/' + esc(String(q.max)) + "</span>"
           : "";
-        return '<button class="q-card' + (q.answered ? " is-answered" : "") + '" type="button" data-number="' + q.number + '" title="' + esc(q.title) + '">' + q.number + score + "</button>";
+        return '<button class="q-card' + (q.answered ? " is-answered" : "") + '" type="button" data-number="' + q.number + '" title="' + esc(q.title) + (q.answered ? " · 已作答" : "") + '">' + q.number + score + "</button>";
       })
       .join("");
   }
