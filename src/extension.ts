@@ -44,6 +44,8 @@ type ViewModel = {
   readonly autoSubmit: boolean;
   /** 已经交卷：按钮锁定为「已交卷」，刷新后也不恢复。 */
   readonly submitted: boolean;
+  /** 是否显示提交按钮；管理权限预览页为 false。 */
+  readonly canSubmit: boolean;
   /** 个人截止时间（epoch 毫秒）；null = 不限时。 */
   readonly deadlineAtMs: number | null;
   /** 当前分支（提交要 push 到它）。 */
@@ -147,6 +149,7 @@ const EMPTY: ViewModel = {
   answering: false,
   autoSubmit: true,
   submitted: false,
+  canSubmit: true,
   deadlineAtMs: null,
   branch: "",
   inQuestion: false,
@@ -336,6 +339,7 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
     return {
       answering: true,
       autoSubmit,
+      canSubmit: await this.canSubmit(folder),
       /* 管理权限的预览页不锁交卷，方便老师自己验证流程。 */
       submitted,
       inQuestion,
@@ -389,6 +393,21 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
       }
     } catch {
       /* 读不到按自动交卷。 */
+    }
+    return true;
+  }
+
+  /** 是否允许提交：页面写 `.sumi/settings.json` 的 `numas.answer.canSubmit`。 */
+  private async canSubmit(folder: vscode.Uri): Promise<boolean> {
+    try {
+      const raw = await this.read(vscode.Uri.joinPath(folder, ".sumi", "settings.json"));
+      if (raw === undefined) return true;
+      const data: unknown = JSON.parse(raw);
+      if (typeof data === "object" && data !== null) {
+        return (data as Record<string, unknown>)["numas.answer.canSubmit"] !== false;
+      }
+    } catch {
+      /* 读不到按可提交。 */
     }
     return true;
   }
@@ -568,6 +587,10 @@ export class AnswerProvider implements vscode.WebviewViewProvider, vscode.Dispos
     }
     if (!(await this.exists(vscode.Uri.joinPath(folder, ...SUBMIT_TOOL_PATH.split("/"))))) {
       throw new Error(`工作区里没有提交工具（${SUBMIT_TOOL_PATH}）`);
+    }
+    /* 管理权限预览页不提供提交。 */
+    if (!(await this.canSubmit(folder))) {
+      return;
     }
     /* 已交卷：刷新 / 旧按钮都不能再触发第二次提交。 */
     if (await this.submitted(folder)) {
@@ -781,7 +804,8 @@ function startTimer(){
 function render(){
   const on = !!model && model.answering;
   const inQuestion = on && model.inQuestion === true;
-  $("foot").classList.toggle("hidden", !on);
+  const canSubmit = on && model.canSubmit !== false;
+  $("foot").classList.toggle("hidden", !canSubmit);
   const graded = on && model.graded === true;
   $("time-group").classList.toggle("hidden", !on || graded);
   $("grade-summary").classList.toggle("hidden", !on || !graded);
@@ -792,7 +816,7 @@ function render(){
    * 卷面（URL 不带题目）只给「提交作答」；进入题目（URL 带题目段）只给「返回试卷」。
    * 两个动作不在同一屏出现，避免学生没作答就交卷 / 在题目里找不到回卷入口。
    */
-  $("submit-btn").classList.toggle("hidden", !on || inQuestion);
+  $("submit-btn").classList.toggle("hidden", !canSubmit || inQuestion);
   if (on && model.submitted) {
     const btn = $("submit-btn");
     btn.disabled = true;
